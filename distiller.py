@@ -65,7 +65,6 @@ class Distiller:
         self.params = params
         self.dump_path = params.dump_path
         self.multi_gpu = params.multi_gpu
-        self.fp16 = params.fp16
 
         self.student = student
         self.teacher = teacher
@@ -125,9 +124,6 @@ class Distiller:
             self.pred_probs = self.pred_probs.to(f"cuda:{params.local_rank}") if params.gpus > 0 else self.pred_probs
             self.teacher_token_probs = teacher_token_probs.to(f"cuda:{params.local_rank}") if params.gpus > 0 else teacher_token_probs
             self.student_token_probs = student_token_probs.to(f"cuda:{params.local_rank}") if params.gpus > 0 else student_token_probs
-            if self.fp16:
-                self.pred_probs = self.pred_probs.half()
-                self.token_probs = self.token_probs.half()
 
         self.epoch = 0
         self.n_iter = 0
@@ -203,34 +199,18 @@ class Distiller:
                                                          num_warmup_steps=warmup_steps, 
                                                          num_training_steps=num_train_optimization_steps)
 
-        if self.fp16:
-            try:
-                from apex import amp
-            except ImportError:
-                raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use fp16 training.")
-            logger.info(f"Using fp16 training: {self.params.fp16_opt_level} level")
-            self.student, self.optimizer = amp.initialize(
-                self.student, self.optimizer, opt_level=self.params.fp16_opt_level
-            )
-            self.teacher = self.teacher.half()
+
 
         if self.multi_gpu:
-            if self.fp16:
-                from apex.parallel import DistributedDataParallel
+            from torch.nn.parallel import DistributedDataParallel
 
-                logger.info("Using apex.parallel.DistributedDataParallel for distributed training.")
-                self.student = DistributedDataParallel(self.student)
-            else:
-                
-                from torch.nn.parallel import DistributedDataParallel
-
-                logger.info("Using nn.parallel.DistributedDataParallel for distributed training.")
-                self.student = DistributedDataParallel(
-                    self.student,
-                    device_ids=[params.local_rank],
-                    output_device=params.local_rank,
-                    find_unused_parameters=True,
-                )
+            logger.info("Using nn.parallel.DistributedDataParallel for distributed training.")
+            self.student = DistributedDataParallel(
+                self.student,
+                device_ids=[params.local_rank],
+                output_device=params.local_rank,
+                find_unused_parameters=True,
+            )
 
         self.is_master = params.is_master
         if self.is_master:
@@ -562,10 +542,7 @@ class Distiller:
         self.iter()
         
         if self.n_iter % self.params.gradient_accumulation_steps == 0:
-            if self.fp16:
-                torch.nn.utils.clip_grad_norm_(amp.master_params(self.optimizer), self.params.max_grad_norm)
-            else:
-                torch.nn.utils.clip_grad_norm_(self.student.parameters(), self.params.max_grad_norm)
+        	torch.nn.utils.clip_grad_norm_(self.student.parameters(), self.params.max_grad_norm)
             self.optimizer.step()
             self.optimizer.zero_grad()
             self.scheduler.step()

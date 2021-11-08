@@ -9,7 +9,7 @@ For training you'll need
 * `rubert_tiny_weights.pth` (student weights for initialization)
 * `ru_convers` (teacher with LM head and fixed configs), `distilrubert_tiny_cased_convers` (not trained student)
 * `teacher2student.pickle` (mapping dict), `t2s_padded.pickle`, `s2t_padded.pickle` (padded matrices)
-`* teacher_counts.pickle`, `student_counts.pickle` (counts for masks generation)
+* `teacher_counts.pickle`, `student_counts.pickle` (counts for masks generation)
 
 ### Preprocessing scripts
 (not needed for training)
@@ -28,8 +28,8 @@ For training you'll need
 ### Training scripts
 To run train (you'll probably need to change GPU count before running):
 ```
-chmod +x train.sh
-./train.sh
+chmod +x run_train.sh
+./run_train.sh
 ```
 Required scripts:
 1. `train.py` -- wrapper to run train
@@ -37,5 +37,5 @@ Required scripts:
 3. `lm_seqs_dataset.py` -- batch generator
 4. `grouped_batch_sampler.py` -- group batches by length, to reduce padding
 5. `utils.py` -- auxilary utils for training
-6. `setup_logger.py` -- initialize file logger for few scripts write logs into same file
+6. `setup_logger.py` -- initialize file logger for few scripts write logs into same file [optional]
 
