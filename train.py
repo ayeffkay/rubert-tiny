@@ -59,10 +59,6 @@ def main():
         type=float, 
         help="Linear weight for the MLM loss. Must be >=0. Should be used in coonjunction with `mlm` flag.",
     )
-    parser.add_argument("--alpha_mse", default=0.0, type=float, help="Linear weight of the MSE loss. Must be >=0.")
-    parser.add_argument(
-        "--alpha_cos", default=0.0, type=float, help="Linear weight of the cosine embedding loss. Must be >=0."
-    )
     parser.add_argument(
         "--mlm", action="store_true", help="The LM step: MLM or CLM. If `mlm` is True, the MLM is used over CLM."
     )
@@ -72,7 +68,6 @@ def main():
         type=float,
         help="Proportion of tokens for which we need to make a prediction.",
     )
-    parser.add_argument("--teacher_token_counts", type=str, help="The token counts in the data_file for MLM.")
     parser.add_argument("--student_token_counts")
     parser.add_argument("--word_mask", default=0.8, type=float, help="Proportion of tokens to mask out.")
     parser.add_argument("--word_keep", default=0.1, type=float, help="Proportion of tokens to keep.")
@@ -194,7 +189,6 @@ def main():
         return token_probs
     
     if args.mlm:
-        teacher_token_probs = get_token_probs(args.teacher_token_counts, teacher_special_tok_ids)
         student_token_probs = get_token_probs(args.student_token_counts, student_special_tok_ids)
     else:
         teacher_token_probs = None
@@ -253,7 +247,6 @@ def main():
     torch.cuda.empty_cache()
     distiller = Distiller(params=args, train_dataset=train_lm_seq_dataset, 
                           valid_dataset=valid_lm_seq_dataset,
-                          teacher_token_probs=teacher_token_probs, 
                           student_token_probs=student_token_probs, 
                           student=student, teacher=teacher)
     distiller.train()

@@ -13,13 +13,11 @@ class LmSeqsDataset(Dataset):
         self.params = params
         self.teacher_tok = [t[0] for t in all_tokens]
         self.student_tok = [t[1] for t in all_tokens]
-        self.t_len = np.array([len(t) for t in self.teacher_tok])
         self.st_len = np.array([len(t) for t in self.student_tok])
                     
     
     def __getitem__(self, i):
-        return (self.teacher_tok[i], self.t_len[i], 
-                self.student_tok[i], self.st_len[i])
+        return (self.teacher_tok[i], self.student_tok[i], self.st_len[i])
 
     def __len__(self):
         return len(self.teacher_tok)
@@ -56,6 +54,7 @@ class LmSeqsDataset(Dataset):
     def gen_batch_t2s_mapping(teacher_batch, teacher_mapping, pad_tok):
         t2s = []
         t2s_lengths = []
+        # ids positions
         idxs = []
         for seq in teacher_batch:
             tokens, i = LmSeqsDataset.gen_t2s_mapping(seq, teacher_mapping)
@@ -82,20 +81,17 @@ class LmSeqsDataset(Dataset):
             pad_student_idx = self.params.student_tok_ids['unk_token']
         
         teacher_ids = [b[0] for b in batch]
-        teacher_lengths = torch.tensor([b[1] for b in batch])
-
         t2s = LmSeqsDataset.gen_batch_t2s_mapping(teacher_ids, self.params.teacher_mapping, pad_student_idx)
         
-        student_ids = LmSeqsDataset.pad2d([b[2] for b in batch], pad_student_idx)
+        student_ids = LmSeqsDataset.pad2d([b[1] for b in batch], pad_student_idx)
         student_ids = torch.tensor(student_ids)
-        student_lengths = torch.tensor([b[3] for b in batch])
+        student_lengths = torch.tensor([b[2] for b in batch])
         
         teacher_ids = LmSeqsDataset.pad2d(teacher_ids, pad_teacher_idx)
         teacher_ids = torch.tensor(teacher_ids)
         
         t2s_ids = torch.tensor(t2s[0])
         
-        return (teacher_ids, teacher_lengths, 
-                student_ids, student_lengths, 
+        return (teacher_ids, student_ids, student_lengths, 
                 t2s_ids, torch.tensor(t2s[1]), torch.tensor(t2s[2]))
 

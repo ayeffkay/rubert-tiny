@@ -57,7 +57,7 @@ def set_grad(var):
 
 class Distiller:
     def __init__(
-        self, params: dict, teacher_token_probs: torch.tensor, student_token_probs: torch.tensor, 
+        self, params: dict, student_token_probs: torch.tensor, 
         student: nn.Module, teacher: nn.Module, 
         train_dataset: LmSeqsDataset, valid_dataset: LmSeqsDataset, 
     ):
@@ -111,10 +111,8 @@ class Distiller:
 
         self.alpha_ce = params.alpha_ce
         self.alpha_mlm = params.alpha_mlm
-        self.alpha_mse = params.alpha_mse
-        self.alpha_cos = params.alpha_cos
-
         self.mlm = params.mlm
+        
         if self.mlm:
             logger.info("Using MLM loss for LM step.")
             self.mlm_mask_prop = params.mlm_mask_prop
@@ -122,7 +120,6 @@ class Distiller:
             assert params.word_mask + params.word_keep + params.word_rand == 1.0
             self.pred_probs = torch.FloatTensor([params.word_mask, params.word_keep, params.word_rand])
             self.pred_probs = self.pred_probs.to(f"cuda:{params.local_rank}") if params.gpus > 0 else self.pred_probs
-            self.teacher_token_probs = teacher_token_probs.to(f"cuda:{params.local_rank}") if params.gpus > 0 else teacher_token_probs
             self.student_token_probs = student_token_probs.to(f"cuda:{params.local_rank}") if params.gpus > 0 else student_token_probs
 
         self.epoch = 0
@@ -134,28 +131,16 @@ class Distiller:
         self.best_total_valid_loss_epoch = sys.maxsize
         self.last_valid_loss_ce_epoch = 0
         self.last_valid_loss_mlm_epoch = 0
-        if self.alpha_mse > 0.0:
-            self.last_valid_loss_mse_epoch = 0
-        if self.alpha_cos > 0.0:
-            self.last_valid_loss_cos_epoch = 0
         
         self.n_valid_iter = 0
         self.last_loss = 0
         self.last_loss_ce = 0
         self.last_loss_mlm = 0
-        if self.alpha_mse > 0.0:
-            self.last_loss_mse = 0
-        if self.alpha_cos > 0.0:
-            self.last_loss_cos = 0
+
         self.last_log = 0
 
         self.ce_loss_fct = nn.KLDivLoss(reduction="batchmean")
-        #self.ce_loss_fct = CrossEntropy()
         self.lm_loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
-        if self.alpha_mse > 0.0:
-            self.mse_loss_fct = nn.MSELoss(reduction="sum")
-        if self.alpha_cos > 0.0:
-            self.cosine_loss_fct = nn.CosineEmbeddingLoss(reduction="mean")
 
         logger.info("--- Initializing model optimizer")
         assert params.gradient_accumulation_steps >= 1
@@ -294,23 +279,17 @@ class Distiller:
             for batch in iter_bar:
                 #if self.params.gpus > 0:
                 batch_cuda = tuple(t.to(f"cuda:{self.params.local_rank}") for t in batch)
-
-                t_tok_ids, t_attn_mask, t_lm_labels = self.prepare_batch_mlm(batch_cuda[0], 
-                                                                             batch_cuda[1], 
-                                                                             self.params.teacher_tok_ids['pad_token'], 
-                                                                             self.params.teacher_tok_ids['mask_token'], self.teacher_token_probs
-                                                                            )
-                st_tok_ids, st_attn_mask, st_lm_labels = self.prepare_batch_mlm(batch_cuda[2], 
-                                                                                batch_cuda[3], self.params.student_tok_ids['pad_token'], 
+                st_tok_ids, st_attn_mask, st_lm_labels = self.prepare_batch_mlm(batch_cuda[1], 
+                                                                                batch_cuda[2], self.params.student_tok_ids['pad_token'], 
                                                                                 self.params.student_tok_ids['mask_token'], self.student_token_probs
                                                                                )
 
-                t2s_tok_ids, t2s_attn_mask, t2s_lm_labels = self.prepare_batch_mlm(batch_cuda[4], 
-                                                                                   batch_cuda[5], self.params.student_tok_ids['pad_token'],
+                t2s_tok_ids, t2s_attn_mask, t2s_lm_labels = self.prepare_batch_mlm(batch_cuda[3], 
+                                                                                   batch_cuda[4], self.params.student_tok_ids['pad_token'],
                                                                                    self.params.student_tok_ids['mask_token'], 
                                                                                    self.student_token_probs)
                
-                self.step(t_tok_ids, t_attn_mask, t_lm_labels, 
+                self.step(batch_cuda[0],
                           st_tok_ids, st_attn_mask, st_lm_labels, 
                           t2s_tok_ids, t2s_attn_mask, t2s_lm_labels, batch_cuda[-1],
                           grad_on=True)
@@ -319,17 +298,12 @@ class Distiller:
                 iter_bar.set_postfix(
                     {"Last_loss": f"{self.last_loss:.5f}", "Avg_cum_loss": f"{self.total_loss_epoch/self.n_iter:.2f}"}
                 )
-                
-
-                
             iter_bar.close()
 
             if self.is_master:
                 logger.info(f"--- Ending epoch {self.epoch}/{self.params.n_epoch-1}")
-            
-            
+
             self.validate()
-            
             self.end_epoch()
 
         if self.is_master:
@@ -350,25 +324,19 @@ class Distiller:
             #if self.params.gpus > 0:
             batch_cuda = tuple(t.to(f"cuda:{self.params.local_rank}") for t in batch)
 
-            t_tok_ids, t_attn_mask, t_lm_labels = self.prepare_batch_mlm(batch_cuda[0], 
-                                                                         batch_cuda[1], 
-                                                                         self.params.teacher_tok_ids['pad_token'], 
-                                                                         self.params.teacher_tok_ids['mask_token'], 
-                                                                         self.teacher_token_probs
-                                                                        )
-            st_tok_ids, st_attn_mask, st_lm_labels = self.prepare_batch_mlm(batch_cuda[2], 
-                                                                            batch_cuda[3], self.params.student_tok_ids['pad_token'], 
+            st_tok_ids, st_attn_mask, st_lm_labels = self.prepare_batch_mlm(batch_cuda[1], 
+                                                                            batch_cuda[2], self.params.student_tok_ids['pad_token'], 
                                                                             self.params.student_tok_ids['mask_token'], self.student_token_probs
                                                                            )
 
-            t2s_tok_ids, t2s_attn_mask, t2s_lm_labels = self.prepare_batch_mlm(batch_cuda[4], 
-                                                                            batch_cuda[5], self.params.student_tok_ids['pad_token'], 
+            t2s_tok_ids, t2s_attn_mask, t2s_lm_labels = self.prepare_batch_mlm(batch_cuda[3], 
+                                                                            batch_cuda[4], self.params.student_tok_ids['pad_token'], 
                                                                             self.params.student_tok_ids['mask_token'], self.student_token_probs
                                                                            )
 
-            loss = self.step(t_tok_ids, t_attn_mask, t_lm_labels, 
+            loss = self.step(batch_cuda[0], 
                       st_tok_ids, st_attn_mask, st_lm_labels, 
-                      t2s_tok_ids, t2s_attn_mask, t2s_lm_labels, batch[6],
+                      t2s_tok_ids, t2s_attn_mask, t2s_lm_labels, batch_cuda[-1],
                       grad_on=False)
 
             iter_bar.update()
@@ -382,7 +350,7 @@ class Distiller:
             logger.info(f"--- Ending validation epoch {self.epoch}/{self.params.n_epoch-1}")
         
         
-    def step(self, t_tok_ids, t_attn_mask, t_lm_labels, 
+    def step(self, t_tok_ids, 
              st_tok_ids, st_attn_mask, st_lm_labels, 
              t2s_tok_ids, t2s_attn_mask, t2s_lm_labels,
              offset, grad_on: bool=True):
@@ -400,10 +368,7 @@ class Distiller:
         """
         
         with torch.no_grad():
-            t_out = self.teacher(
-                input_ids=t_tok_ids, attention_mask=t_attn_mask
-            )
-            
+            t_out = self.teacher(input_ids=t_tok_ids)
             t_logits = t_out.logits.detach()
             t_hidden_states = t_out.hidden_states
             t_attentions = t_out.attentions
@@ -428,17 +393,8 @@ class Distiller:
         if self.params.restrict_ce_to_mask:
             mask = (lm_labels > -1).unsqueeze(-1).expand_as(s_logits)  # (bs, seq_length, voc_size)
         else:
-            t_attn_mask = t_attn_mask.unsqueeze(-1).expand_as(t_logits)  # (bs, seq_length, voc_size)
             st_attn_mask = st_attn_mask.unsqueeze(-1).expand_as(s_logits)
             t2s_attn_mask = t2s_attn_mask.unsqueeze(-1).expand_as(t2s_logits)
-        
-        """
-        s_logits_slct = torch.masked_select(s_logits, mask)  # (bs * seq_length * voc_size) modulo the 1s in mask
-        s_logits_slct = s_logits_slct.view(-1, s_logits.size(-1))  # (bs * seq_length, voc_size) modulo the 1s in mask
-        t_logits_slct = torch.masked_select(t_logits, mask)  # (bs * seq_length * voc_size) modulo the 1s in mask
-        t_logits_slct = t_logits_slct.view(-1, s_logits.size(-1))  # (bs * seq_length, voc_size) modulo the 1s in mask
-        assert t_logits_slct.size() == s_logits_slct.size()
-        """
         
         def reduce_student_logits_to_teacher(t2s_logits, idxs_padded):
             bs, stu_seq_len, stu_voc_size = t2s_logits.shape
@@ -491,10 +447,6 @@ class Distiller:
             if self.alpha_mlm > 0.0:
                 loss_mlm = self.lm_loss_fct(s_logits.view(-1, s_logits.size(-1)), st_lm_labels.view(-1))
                 loss = loss + self.alpha_mlm * loss_mlm
-
-
-
-
                                     
             if grad_on:
                 self.total_loss_epoch += loss.item()
@@ -502,21 +454,14 @@ class Distiller:
                 self.last_loss_ce = loss_ce.item()
                 if self.alpha_mlm > 0.0:
                     self.last_loss_mlm = loss_mlm.item()
-                if self.alpha_mse > 0.0:
-                    self.last_loss_mse = loss_mse.item()
-                if self.alpha_cos > 0.0:
-                    self.last_loss_cos = loss_cos.item()
+                    
                 self.optimize(loss)
                 self.n_sequences_epoch += t_tok_ids.size(0)
             else:
                 self.total_valid_loss_epoch += loss.item()
                 self.last_valid_loss_ce_epoch += loss_ce.item()
                 if self.alpha_mlm > 0.0:
-                    self.last_valid_loss_mlm_epoch = self.last_valid_loss_mlm_epoch + loss_mlm.item()
-                if self.alpha_mse > 0.0:
-                    self.last_valid_loss_mse_epoch += loss_mse.item()
-                if self.alpha_cos > 0.0:
-                    self.last_valid_loss_cos_epoch += loss_cos.item()
+                    self.last_valid_loss_mlm_epoch += loss_mlm.item()
                 self.n_valid_iter += 1
 
         return loss
@@ -601,14 +546,6 @@ class Distiller:
             self.tensorboard.add_scalar(
                 tag="losses/loss_mlm", scalar_value=self.last_loss_mlm, global_step=self.n_total_iter
             )
-        if self.alpha_mse > 0.0:
-            self.tensorboard.add_scalar(
-                tag="losses/loss_mse", scalar_value=self.last_loss_mse, global_step=self.n_total_iter
-            )
-        if self.alpha_cos > 0.0:
-            self.tensorboard.add_scalar(
-                tag="losses/loss_cos", scalar_value=self.last_loss_cos, global_step=self.n_total_iter
-            )
         self.tensorboard.add_scalar(
             tag="learning_rate/lr", scalar_value=self.scheduler.get_lr()[0], global_step=self.n_total_iter
         )
@@ -652,20 +589,6 @@ class Distiller:
                     global_step=self.epoch
                 )
                 self.last_valid_loss_mlm_epoch = 0
-            if self.alpha_mse > 0.0:
-                self.last_valid_loss_mse_epoch /= self.n_valid_iter
-                self.tensorboard.add_scalar(
-                    tag="epoch/valid_mse_loss", scalar_value=self.last_valid_loss_mse_epoch, 
-                    global_step=self.epoch
-                )
-                self.last_valid_loss_mse_epoch = 0
-            if self.alpha_cos > 0.0:
-                self.last_valid_loss_cos_epoch /= self.n_valid_iter
-                self.tensorboard.add_scalar(
-                    tag="epoch/valid_cos_loss", scalar_value=self.last_valid_loss_cos_epoch, 
-                    global_step=self.epoch
-                )
-                self.last_valid_loss_cos_epoch = 0
             if mean_valid_loss < self.best_total_valid_loss_epoch:
                 self.best_total_valid_loss_epoch = mean_valid_loss
                 self.save_checkpoint(checkpoint_name=f"best_valid.pth")

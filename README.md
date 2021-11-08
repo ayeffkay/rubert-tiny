@@ -3,13 +3,13 @@
 pip install -r requirements.txt
 ```
 ### Data
-Required data files are already generated and located in `/home/ayeffkay/rubert_tiny`. Provided scripts generate files with same names.
+Required data files are already generated and located in `/home/ayeffkay/rubert_tiny`. Provided scripts can generate files with same names.
 For training you'll need 
 * folder `processed_binarized` (binarized shards)
 * `rubert_tiny_weights.pth` (student weights for initialization)
 * `ru_convers` (teacher with LM head and fixed configs), `distilrubert_tiny_cased_convers` (not trained student)
 * `teacher2student.pickle` (mapping dict), `t2s_padded.pickle`, `s2t_padded.pickle` (padded matrices)
-* `teacher_counts.pickle`, `student_counts.pickle` (counts for masks generation)
+* `teacher_counts.pickle`, `student_counts.pickle` (counts for sampling to generate masks)
 
 ### Preprocessing scripts
 (not needed for training)
@@ -37,5 +37,5 @@ Required scripts:
 3. `lm_seqs_dataset.py` -- batch generator
 4. `grouped_batch_sampler.py` -- group batches by length, to reduce padding
 5. `utils.py` -- auxilary utils for training
-6. `setup_logger.py` -- initialize file logger for few scripts write logs into same file [optional]
+6. `setup_logger.py` -- initialize file logger for few separate scripts to be able to write logs into the same file [optional]
 
