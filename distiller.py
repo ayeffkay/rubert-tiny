@@ -487,7 +487,7 @@ class Distiller:
         self.iter()
         
         if self.n_iter % self.params.gradient_accumulation_steps == 0:
-        	torch.nn.utils.clip_grad_norm_(self.student.parameters(), self.params.max_grad_norm)
+            torch.nn.utils.clip_grad_norm_(self.student.parameters(), self.params.max_grad_norm)
             self.optimizer.step()
             self.optimizer.zero_grad()
             self.scheduler.step()
