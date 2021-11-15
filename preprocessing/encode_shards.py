@@ -68,7 +68,6 @@ def load_mapping(mapping_file):
 
 def teacher2student(mapping_dict, seq):
     res = []
-    #lengths = []
     res = itertools.chain.from_iterable([mapping_dict[idx] for idx in seq])
     return list(res)
     
@@ -87,11 +86,10 @@ def wrapper(data_file, binarized_folder, teacher_tokenizer_name, student_tokeniz
             st_tokens.append(seq_s)
             
     total = list(zip(t_tokens, st_tokens))
-    #total = list(zip(rslt1, rslt2))
     output_file = os.path.join(binarized_folder, os.path.split(data_file)[-1]) + '.pickle'
     logger.info(f"Dump to {output_file}")
     with open(output_file, "wb") as handle:
-        pickle.dump(total, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        pickle.dump(total, handle)
         
     logger.info("Finished binarization")
     logger.info(f"{len(total)} examples processed.")

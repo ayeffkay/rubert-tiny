@@ -23,7 +23,6 @@ if __name__ == '__main__':
     yttm.BPE.train(data=str(filepath), vocab_size=vocab_size, model=str(yttm_model_file), coverage=coverage)
 
     bpe = yttm.BPE(model=str(yttm_model_file))
-
     print('building new vocab...')
 
     # make subtokens in bert notation, first five tokens are special tokens from yttm
@@ -51,30 +50,26 @@ if __name__ == '__main__':
                 original_tokens += [line.strip()]
             else:
                 break
-        original_tokens += ['[PADT2S]']
-        original_tokens += ['[PADS2T]']
 
     print(f'writing vocab to: {new_vocab_file}')
-    
-    # manually add alphanumeric characters (disabled in last version)
+    # write new vocab
+    total = original_tokens + new_subtokens
+    # add alphanumeric characters
     """
     a = ord('а')
     russian_lower = ''.join([chr(i) for i in range(a,a+32)])
     russian_upper = russian_lower.upper()
     alphanum = string.ascii_lowercase + string.ascii_uppercase + string.digits + russian_lower + russian_upper
-    total = original_tokens + new_subtokens
-
     for sym in alphanum:
         if sym not in total:
             total.append(sym)
         if f'##{sym}' not in total:
             total.append(f'##{sym}')
     """
-    
     with (new_vocab_file).open('w', encoding='utf8') as fout:
         for el in total:
             fout.write(el + '\n')
     print('finished. {} tokens were saved.'.format(len(total)))
     
-    student_tokenizer = DistilBertTokenizer(vocab_file='bpe_vocab_30515.txt', type='distilbert', do_lower_case=False)
+    student_tokenizer = DistilBertTokenizer(vocab_file='bpe_vocab_30515.txt', do_lower_case=False)
     student_tokenizer.save_pretrained('distilrubert_tiny_cased_convers')

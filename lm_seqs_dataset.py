@@ -1,27 +1,31 @@
 import numpy as np
 import torch
 from torch.utils.data import Dataset
-import pickle
-
-from utils import logger
-import time
-
-from setup_logger import setup_logger
 
 class LmSeqsDataset(Dataset):
     def __init__(self, params, all_tokens):
         self.params = params
         self.teacher_tok = [t[0] for t in all_tokens]
         self.student_tok = [t[1] for t in all_tokens]
+        if hasattr(params, 'matching_ids'):
+            self.teacher_ids_mask = [t[2] for t in all_tokens]
+            self.student_ids_mask = [t[3] for t in all_tokens]
+        self.t_len = np.array([len(t) for t in self.teacher_tok])
         self.st_len = np.array([len(t) for t in self.student_tok])
                     
     
     def __getitem__(self, i):
-        return (self.teacher_tok[i], self.student_tok[i], self.st_len[i])
+        item = [self.teacher_tok[i], self.t_len[i], 
+                self.student_tok[i], self.st_len[i]]
+        if hasattr(self.params, 'matching_ids'):
+            teacher_ids_mask = self.teacher_ids_mask[i]
+            student_ids_mask = self.student_ids_mask[i]
+            item.append(teacher_ids_mask)
+            item.append(student_ids_mask)
+        return item
 
     def __len__(self):
         return len(self.teacher_tok)
-
 
     @staticmethod
     def pad2d(batch, pad_idx, max_seq_len=None):
@@ -54,7 +58,6 @@ class LmSeqsDataset(Dataset):
     def gen_batch_t2s_mapping(teacher_batch, teacher_mapping, pad_tok):
         t2s = []
         t2s_lengths = []
-        # ids positions
         idxs = []
         for seq in teacher_batch:
             tokens, i = LmSeqsDataset.gen_t2s_mapping(seq, teacher_mapping)
@@ -68,30 +71,42 @@ class LmSeqsDataset(Dataset):
         return t2s, t2s_lengths, idxs
        
     def batch_sequences(self, batch):
-        """
-        Do the padding and transform into torch.tensor.
-        """
+        pad_teacher_idx = self.params.teacher_tok_ids['pad_token']
+        pad_student_idx = self.params.student_tok_ids['pad_token']
 
-        # Pad token ids
-        if self.params.mlm:
-            pad_teacher_idx = self.params.teacher_tok_ids['pad_token']
-            pad_student_idx = self.params.student_tok_ids['pad_token']
-        else:
-            pad_teacher_idx = self.params.teacher_tok_ids['unk_token']
-            pad_student_idx = self.params.student_tok_ids['unk_token']
-        
         teacher_ids = [b[0] for b in batch]
-        t2s = LmSeqsDataset.gen_batch_t2s_mapping(teacher_ids, self.params.teacher_mapping, pad_student_idx)
-        
-        student_ids = LmSeqsDataset.pad2d([b[1] for b in batch], pad_student_idx)
-        student_ids = torch.tensor(student_ids)
-        student_lengths = torch.tensor([b[2] for b in batch])
-        
-        teacher_ids = LmSeqsDataset.pad2d(teacher_ids, pad_teacher_idx)
-        teacher_ids = torch.tensor(teacher_ids)
-        
-        t2s_ids = torch.tensor(t2s[0])
-        
-        return (teacher_ids, student_ids, student_lengths, 
-                t2s_ids, torch.tensor(t2s[1]), torch.tensor(t2s[2]))
+        teacher_lengths = torch.tensor([b[1] for b in batch])
+        teacher_ids_padded = LmSeqsDataset.pad2d(teacher_ids, pad_teacher_idx)
 
+        student_ids_padded = LmSeqsDataset.pad2d([b[2] for b in batch], pad_student_idx)
+        student_lengths = [b[3] for b in batch]
+
+        batch_dict = dict(
+            t_ids = teacher_ids_padded,
+            t_lengths = teacher_lengths,
+            s_ids = student_ids_padded, 
+            s_lengths = student_lengths
+
+        )
+        
+        if self.params.t2s_mapping:
+            # t2s_idxs (padded to max_t2s_ids len), t2s_lengths, grouped_idxs (may be padded or not in general)
+            t2s_ids_padded, t2s_lengths, student_split_ids = LmSeqsDataset.gen_batch_t2s_mapping(teacher_ids, self.params.t2s_mapping, pad_student_idx)
+            batch_dict.update(
+                dict(
+                    t2s_ids=t2s_ids_padded, 
+                    t2s_lengths=t2s_lengths,
+                    student_split_ids=student_split_ids)
+                )
+        if hasattr(self.params, 'matching_ids'):
+            teacher_mask = LmSeqsDataset.pad2d([b[4] for b in batch], 2)
+            student_mask = LmSeqsDataset.pad2d([b[5] for b in batch], 2)
+            batch_dict.update(
+                dict(
+                    teacher_mask=teacher_mask,
+                    student_mask=student_mask        
+                )
+            )
+        
+        batch_dict = {arg_name: torch.tensor(arg_value) for arg_name, arg_value in batch_dict.items()}
+        return batch_dict

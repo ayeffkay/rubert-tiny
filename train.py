@@ -35,15 +35,47 @@ def get_special_tokens_map(tokenizer):
     return special_tok_ids
 
 
+def select_shards(data_folder, gpus, local_rank, n_shards=-1):
+    all_shards = list(sorted(glob.glob(data_folder + '/*')))
+    shards_per_worker = len(all_shards) // gpus if n_shards == -1 else 1
+    shards_slct = all_shards[local_rank * shards_per_worker:(local_rank + 1) * shards_per_worker]
+    return shards_slct
+
+
+def load_data_from_shards(shards_slct):
+    train_data = []
+    for shard_file in shards_slct:
+        with open(shard_file, 'rb') as fp:
+            train_data.extend(pickle.load(fp))
+    return train_data
+
+
+def get_token_probs(tok_counts_file, special_tok_ids, mlm_smoothing):
+    logger.info(f"Loading token counts from {tok_counts_file} (already pre-computed)")
+    with open(tok_counts_file, "rb") as fp:
+        counts = pickle.load(fp)
+    token_probs = np.maximum(counts, 1) ** mlm_smoothing
+    for idx in special_tok_ids.values():
+        token_probs[idx] = 0.0  # do not predict special tokens
+    token_probs = torch.from_numpy(token_probs)
+    return token_probs
+
+
+def get_matched_ts_ids(ids_file):
+    with open(ids_file, 'rb') as f:
+        ids_vocab = pickle.load(f) # {'token': [teacher_id, student_id]}
+        teacher_ids = [ids[0] for ids in ids_vocab.values()]
+        student_ids = [ids[1] for ids in ids_vocab.values()]
+    return teacher_ids, student_ids
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--force", action="store_true", help="Overwrite dump_path if it already exists.")
     parser.add_argument(
          "--dump_path", type=str, required=True, help="The output directory (log, checkpoints, parameters, etc.)"
     )
-    parser.add_argument(
-        "--binarized_data_folder"
-    )
+    parser.add_argument("--binarized_data_folder")
     parser.add_argument("--student_name", type=str, required=True, help="Path to the student configuration.")
     parser.add_argument(
         "--student_pretrained_weights", default=None, type=str, help="Load student initialization checkpoint."
@@ -53,6 +85,7 @@ def main():
     parser.add_argument(
         "--alpha_ce", default=0.5, type=float, help="Linear weight for the distillation loss. Must be >=0."
     )
+    
     parser.add_argument(
         "--alpha_mlm", 
         default=0.0, 
@@ -60,29 +93,40 @@ def main():
         help="Linear weight for the MLM loss. Must be >=0. Should be used in coonjunction with `mlm` flag.",
     )
     parser.add_argument(
-        "--mlm", action="store_true", help="The LM step: MLM or CLM. If `mlm` is True, the MLM is used over CLM."
+        "--mlm_smoothing",
+        default=0.7,
+        type=float,
+        help="Smoothing parameter to emphasize more rare tokens.",
     )
+    
     parser.add_argument(
         "--mlm_mask_prop", 
         default=0.15, 
         type=float,
         help="Proportion of tokens for which we need to make a prediction.",
     )
-    parser.add_argument("--student_token_counts")
     parser.add_argument("--word_mask", default=0.8, type=float, help="Proportion of tokens to mask out.")
     parser.add_argument("--word_keep", default=0.1, type=float, help="Proportion of tokens to keep.")
     parser.add_argument("--word_rand", default=0.1, type=float, help="Proportion of tokens to randomly replace.")
+    
+
+    parser.add_argument("--alpha_mse", default=0.0, type=float, help="Linear weight of the MSE loss. Must be >=0.")
+    parser.add_argument('--projection_strategy', choices=['last', 'skip', 'average', 'average_by_layers'], default='average_by_layers', 
+                        help="""How to use student and teacher hidden representations for MSE loss.
+                        last -- use last states of teacher and student (1-1 mapping), 
+                        skip -- use intermediate states from teacher and student (1-1 mapping), 
+                        average -- average teacher layers output sequentially to fit number of student hidden layers (1-n mapping)
+                        average_by_layers -- average student and teacher hidden representations by layers (m-n mapping to 1-1 mapping)
+                        """)
+
     parser.add_argument(
-        "--mlm_smoothing",
-        default=0.7,
-        type=float,
-        help="Smoothing parameter to emphasize more rare tokens (see XLM, similar to word2vec).",
+        "--alpha_cos", default=0.0, type=float, help="Linear weight of the cosine embedding loss. Must be >=0."
     )
-    parser.add_argument(
-        "--restrict_ce_to_mask", 
-        action="store_true", 
-        help="If true, compute the distilation loss only the [MLM] prediction distribution.",
-        )
+    parser.add_argument("--alpha_contrastive", default=0.0, type=float)
+
+    parser.add_argument("--teacher_token_counts", nargs='?', type=str, help="The token counts in the data_file for MLM.")
+    parser.add_argument("--student_token_counts", nargs='?')
+
     parser.add_argument("--n_epoch", type=int, default=3, help="Number of pass on the whole dataset.")
     parser.add_argument("--batch_size", type=int, default=5, help="Batch size (for each process).")
     parser.add_argument(
@@ -110,23 +154,18 @@ def main():
 
     parser.add_argument("--log_interval", type=int, default=500, help="Tensorboard logging interval.")
     parser.add_argument("--checkpoint_interval", type=int, default=4000, help="Checkpoint interval.")
+    parser.add_argument("--valid_prop", type=float, default=0.1)
     
-    parser.add_argument(
-        "--fp16",
-        action="store_true",
-        help="Whether to use 16-bit (mixed) precision (through NVIDIA apex) instead of 32-bit",
-    )
-    parser.add_argument(
-        "--fp16_opt_level",
-        type=str,
-        default="O1",
-        help="For fp16: Apex AMP optimization level selected in ['O0', 'O1', 'O2', and 'O3']."
-        "See details at https://nvidia.github.io/apex/amp.html",
-    )
-    
-    parser.add_argument('--teacher_mapping')
-    parser.add_argument('--t2s_vocab_padded')
-    parser.add_argument('--s2t_vocab_padded')
+    parser.add_argument('--t2s_mapping', nargs='?')
+
+    subparsers = parser.add_subparsers(help="Distillation type specific parameters")
+    tokens_mapping_parser = subparsers.add_parser('tokens_mapping')
+    tokens_mapping_parser.add_argument('--t2s_vocab_padded', nargs='?')
+    tokens_mapping_parser.add_argument('--s2t_vocab_padded', nargs='?')
+
+    matched_tokens_parser = subparsers.add_parser('matched_tokens')
+    matched_tokens_parser.add_argument('--matching_ids', nargs='?')
+
 
     args = parser.parse_args()
     init_gpu_params(args)
@@ -146,15 +185,16 @@ def main():
             os.makedirs(args.dump_path)
         logger.info(f"Experiment will be dumped and logged in {args.dump_path}")
 
-        # SAVE PARAMS #
         logger.info(f"Param: {args}")
         with open(os.path.join(args.dump_path, "parameters.json"), "w") as f:
             json.dump(vars(args), f, indent=4)
 
     student_config_class, student_model_class, student_tokenizer_class = MODEL_CLASSES["distilbert"]
-    teacher_config_class, teacher_model_class, teacher_tokenizer_class = MODEL_CLASSES["bert"]
+    _, teacher_model_class, teacher_tokenizer_class = MODEL_CLASSES["bert"]
 
-    # TOKENIZER #
+    """
+    Tokenizers and special tokens mapping
+    """
     teacher_tokenizer = teacher_tokenizer_class.from_pretrained(args.teacher_name, do_lower_case=False)
     student_tokenizer = student_tokenizer_class.from_pretrained(args.student_name, do_lower_case=False)
     
@@ -163,47 +203,47 @@ def main():
     
     logger.info(f"Teacher special tokens {teacher_special_tok_ids}")
     logger.info(f"Student special tokens {student_special_tok_ids}")
+
+
     args.teacher_tok_ids = teacher_special_tok_ids
     args.student_tok_ids = student_special_tok_ids
     args.max_model_input_size = teacher_tokenizer.max_model_input_sizes.get(args.teacher_name, 512)
 
-    # DATA LOADER #
-    #logger.info(f"Loading data from {args.data_file}")
+    """
+    Data subset selection for worker
+    """
     logger.info(f"Loading data from {args.binarized_data_folder}")
-    all_shards = list(sorted(glob.glob(args.binarized_data_folder + '/*')))
-    shards_per_worker = len(all_shards) // int(os.environ['WORLD_SIZE'])
-    shards_slct = all_shards[args.local_rank * shards_per_worker:(args.local_rank + 1) * shards_per_worker]
-    train_data = []
-    for shard_file in shards_slct:
-        with open(shard_file, 'rb') as fp:
-            train_data.extend(pickle.load(fp))
+    shards_slct = select_shards(args.binarized_data_folder, args.gpus, args.local_rank, 1)
+    train_data = load_data_from_shards(shards_slct)
     
-    def get_token_probs(tok_counts_file, special_tok_ids):
-        logger.info(f"Loading token counts from {tok_counts_file} (already pre-computed)")
-        with open(tok_counts_file, "rb") as fp:
-            counts = pickle.load(fp)
-        token_probs = np.maximum(counts, 1) ** -args.mlm_smoothing
-        for idx in special_tok_ids.values():
-            token_probs[idx] = 0.0  # do not predict special tokens
-        token_probs = torch.from_numpy(token_probs)
-        return token_probs
-    
-    if args.mlm:
-        student_token_probs = get_token_probs(args.student_token_counts, student_special_tok_ids)
+    """
+    Counting probs for MLM
+    """
+    if args.alpha_mlm:
+        assert args.alpha_mlm and (args.teacher_token_counts is not None or args.student_token_counts is not None)
+        args.teacher_token_probs = get_token_probs(args.teacher_token_counts, 
+                                                teacher_special_tok_ids, args.mlm_smoothing) if args.teacher_token_counts else None
+        args.student_token_probs = get_token_probs(args.student_token_counts, 
+                                                student_special_tok_ids, args.mlm_smoothing) if args.student_token_counts else None
     else:
-        teacher_token_probs = None
-        student_token_probs = None
+        args.teacher_token_probs = None
+        args.student_token_probs = None
         
+    """
+    Train/validation split
+    """
     n = len(train_data)
-    m = int(0.1 * n)
+    m = int(args.valid_prop * n)
     valid_data = train_data[n - m:]
     train_data = train_data[:n - m]
     train_lm_seq_dataset = LmSeqsDataset(params=args, all_tokens=train_data)
     valid_lm_seq_dataset = LmSeqsDataset(params=args, all_tokens=valid_data)
     
-    logger.info("Data loader created.")
+    logger.info("Train and validation data sets created.")
 
-    # STUDENT #
+    """
+    Student initialization
+    """
     logger.info(f"Loading student config from {args.student_name}")
     stu_architecture_config = student_config_class.from_pretrained(args.student_name)
     stu_architecture_config.output_hidden_states = True
@@ -220,41 +260,54 @@ def main():
         student.to(f"cuda:{args.local_rank}")
     logger.info("Student loaded.")
 
-    # TEACHER #
+    """
+    Teacher initialization
+    """
     teacher = teacher_model_class.from_pretrained(args.teacher_name, 
                                                   output_hidden_states=True, 
                                                   output_attentions=True)
     if args.gpus > 0:
         teacher.to(f"cuda:{args.local_rank}")
     logger.info(f"Teacher loaded from {args.teacher_name}")
-    
-    
-    with open(args.teacher_mapping, 'rb') as f:
-        args.teacher_mapping = pickle.load(f)
-    logger.info("Loaded teacher2student mapping file.")
-    
-    
-    with open(args.t2s_vocab_padded, 'rb') as f:
-        args.t2s_vocab_padded = torch.tensor(pickle.load(f)).to(f'cuda:{args.local_rank}')
-    logger.info("Loaded padded teacher2student mapping file")
-    
 
-    with open(args.s2t_vocab_padded, 'rb') as f:
-        args.s2t_vocab_padded = torch.tensor(pickle.load(f)).to(f'cuda:{args.local_rank}')
+
+    """
+    Special t2s/s2t mappings
+    """
+    if args.t2s_mapping:
+        with open(args.t2s_mapping, 'rb') as f:
+            args.t2s_mapping = pickle.load(f)
+        logger.info("Loaded teacher2student mapping file.")
     
+    if hasattr(args, 't2s_vocab_padded'):
+        with open(args.t2s_vocab_padded, 'rb') as f:
+            args.t2s_vocab_padded = torch.tensor(pickle.load(f)).to(f'cuda:{args.local_rank}')
+        logger.info("Loaded padded teacher2student mapping file")
     
-    # DISTILLER #
+    if hasattr(args,'s2t_vocab_padded') and args.s2t_vocab_padded is not None:
+        with open(args.s2t_vocab_padded, 'rb') as f:
+            args.s2t_vocab_padded = torch.tensor(pickle.load(f)).to(f'cuda:{args.local_rank}')
+        logger.info("Loaded padded student2teacher mapping file")
+
+    
+    """
+    Matching tokens loading
+    """
+    if hasattr(args, 'matching_ids'):
+        teacher_matched, student_matched = get_matched_ts_ids(args.matching_ids)
+        args.teacher_matched = torch.tensor(teacher_matched).to(f'cuda:{args.local_rank}')
+        args.student_matched = torch.tensor(student_matched).to(f'cuda:{args.local_rank}')
+        logger.info("Loaded teacher and student matched ids.")
+    
+    """
+    Initializing distillation wrapper
+    """
     torch.cuda.empty_cache()
-    distiller = Distiller(params=args, train_dataset=train_lm_seq_dataset, 
-                          valid_dataset=valid_lm_seq_dataset,
-                          student_token_probs=student_token_probs, 
-                          student=student, teacher=teacher)
+    distiller = Distiller(params=args, 
+                            train_dataset=train_lm_seq_dataset, 
+                            valid_dataset=valid_lm_seq_dataset, 
+                            student=student, teacher=teacher)
     distiller.train()
-    logger.info("Let's go get some drinks.")
-    
+
 if __name__ == "__main__":
     main()
-
-
-
-

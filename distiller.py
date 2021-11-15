@@ -3,12 +3,14 @@ import os
 import time
 
 import psutil
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.utils.data import BatchSampler, DataLoader, RandomSampler
 from torch.utils.data.distributed import DistributedSampler
+from torch.nn.parallel import DistributedDataParallel
 from tqdm import tqdm
 
 from grouped_batch_sampler import GroupedBatchSampler, create_lengths_groups
@@ -19,8 +21,7 @@ import sys
 
 
 from setup_logger import setup_logger
-
-import pickle
+import time
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -28,36 +29,12 @@ except ImportError:
     from tensorboardX import SummaryWriter
 
 from transformers import AutoConfig
+import custom_step
 
-
-
-class MyIndex(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, tensor, indices, inverted_indices):
-        # tensor: 2-d tensor (bs * seq_len) x (student_vocab_size + 1)
-        ctx.tensor_shape = tensor.shape
-        ctx.inverted_indices = inverted_indices
-        return tensor[:, indices]
-        
-    @staticmethod
-    def backward(ctx, grad_output):
-        # 3-d grad_output, gradients in last dimension are equal (as grad_output is result of torch.sum)
-        # (bs * seq_len) x teacher_vocab_size x X
-        x = grad_output[:,:, 0]
-        #device = x.device
-        #x = torch.cat([x, torch.zeros((grad_output.shape[0], 1), device=device)], dim=-1)
-        return torch.sum(x[:, ctx.inverted_indices], dim=-1), None, None
-        
-
-def set_grad(var):
-    def hook(grad):
-        var.grad = grad
-    return hook
-    
 
 class Distiller:
     def __init__(
-        self, params: dict, student_token_probs: torch.tensor, 
+        self, params: dict, 
         student: nn.Module, teacher: nn.Module, 
         train_dataset: LmSeqsDataset, valid_dataset: LmSeqsDataset, 
     ):
@@ -71,11 +48,9 @@ class Distiller:
 
         self.student_config = AutoConfig.from_pretrained(params.student_name)
         self.student_vocab_size = student.config.vocab_size
-        
         self.teacher_vocab_size = teacher.config.vocab_size
         
         logger.info("Train size: {}, valid_size: {}".format(len(train_dataset), len(valid_dataset)))
-
         if params.gpus <= 1:
             train_sampler = RandomSampler(train_dataset)
             valid_sampler = RandomSampler(valid_dataset)
@@ -104,43 +79,61 @@ class Distiller:
         self.valid_dataloader = DataLoader(dataset=valid_dataset, 
                                            batch_sampler=valid_sampler,
                                            collate_fn=valid_dataset.batch_sequences)
-        # nn.Parameter(params.temperature)
-        #self.temperature = nn.Parameter(torch.tensor([params.temperature], dtype=torch.float))
         self.temperature = params.temperature
         assert self.temperature > 0.0
 
         self.alpha_ce = params.alpha_ce
         self.alpha_mlm = params.alpha_mlm
-        self.mlm = params.mlm
-        
-        if self.mlm:
+        self.alpha_mse = params.alpha_mse
+        self.alpha_cos = params.alpha_cos
+        self.alpha_contrastive = params.alpha_contrastive 
+
+        if self.alpha_mlm:
             logger.info("Using MLM loss for LM step.")
             self.mlm_mask_prop = params.mlm_mask_prop
             assert 0.0 <= self.mlm_mask_prop <= 1.0
             assert params.word_mask + params.word_keep + params.word_rand == 1.0
             self.pred_probs = torch.FloatTensor([params.word_mask, params.word_keep, params.word_rand])
             self.pred_probs = self.pred_probs.to(f"cuda:{params.local_rank}") if params.gpus > 0 else self.pred_probs
-            self.student_token_probs = student_token_probs.to(f"cuda:{params.local_rank}") if params.gpus > 0 else student_token_probs
-
+            if params.student_token_probs is not None:
+                self.student_token_probs = params.student_token_probs.to(f"cuda:{params.local_rank}") if params.gpus > 0 else params.student_token_probs
+            else:
+                self.student_token_probs = None
+            
         self.epoch = 0
         self.n_iter = 0
         self.n_total_iter = 0
         self.n_sequences_epoch = 0
+        self.last_loss = 0
         self.total_loss_epoch = 0
         self.total_valid_loss_epoch = 0
         self.best_total_valid_loss_epoch = sys.maxsize
-        self.last_valid_loss_ce_epoch = 0
-        self.last_valid_loss_mlm_epoch = 0
-        
         self.n_valid_iter = 0
-        self.last_loss = 0
-        self.last_loss_ce = 0
-        self.last_loss_mlm = 0
-
         self.last_log = 0
 
-        self.ce_loss_fct = nn.KLDivLoss(reduction="batchmean")
-        self.lm_loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
+        if self.alpha_ce > 0.0:   
+            self.last_loss_ce = 0
+            self.last_valid_loss_ce_epoch = 0
+            self.ce_loss_fct = nn.KLDivLoss(reduction="sum")
+        if self.alpha_mlm > 0.0:
+            self.last_loss_mlm = 0
+            self.last_valid_loss_mlm_epoch = 0
+            self.lm_loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
+        if self.alpha_mse > 0.0:
+            self.last_loss_mse = 0
+            self.last_valid_loss_mse_epoch = 0
+            self.mse_loss_fct = nn.MSELoss(reduction="sum")
+            self.hid_projector_mse = nn.Linear(student.config.hidden_size, teacher.config.hidden_size).to(f'cuda:{params.local_rank}')
+        if self.alpha_cos > 0.0:
+            self.last_loss_cos = 0
+            self.last_valid_loss_cos_epoch = 0
+            self.cosine_loss_fct = nn.CosineEmbeddingLoss(reduction="mean")
+            ## TODO: self.attn_projector
+        if self.alpha_contrastive > 0.0:
+            self.last_loss_contrastive = 0
+            self.last_valid_loss_contrastive = 0
+            self.hid_projector_contrastive = nn.Linear(student.config.hidden_size, teacher.config.hidden_size)
+            
 
         logger.info("--- Initializing model optimizer")
         assert params.gradient_accumulation_steps >= 1
@@ -165,11 +158,6 @@ class Distiller:
             }
             
         ]
-        """
-            {
-                "params": self.temperature
-            }
-        """
         logger.info(
             "------ Number of trainable parameters (student): %i"
             % sum([p.numel() for p in self.student.parameters() if p.requires_grad])
@@ -184,11 +172,7 @@ class Distiller:
                                                          num_warmup_steps=warmup_steps, 
                                                          num_training_steps=num_train_optimization_steps)
 
-
-
         if self.multi_gpu:
-            from torch.nn.parallel import DistributedDataParallel
-
             logger.info("Using nn.parallel.DistributedDataParallel for distributed training.")
             self.student = DistributedDataParallel(
                 self.student,
@@ -203,6 +187,12 @@ class Distiller:
             self.tensorboard = SummaryWriter(log_dir=os.path.join(self.dump_path, "log", "train"))
             self.tensorboard.add_text(tag="config/training", text_string=str(self.params), global_step=0)
             self.tensorboard.add_text(tag="config/student", text_string=str(self.student_config), global_step=0)
+
+    
+    def generate_padding_mask(self, seq_len, lengths):
+        padding_mask = torch.arange(seq_len, dtype=torch.long, device=lengths.device) < lengths[:,None]
+        return padding_mask
+
 
     def prepare_batch_mlm(self, tok_ids, lengths, pad_token_id, mask_token_id, token_probs):
         """
@@ -220,7 +210,6 @@ class Distiller:
             attn_mask: `torch.tensor(bs, seq_length)` - The attention mask for the self-attention.
             mlm_labels: `torch.tensor(bs, seq_length)` - The masked language modeling labels. There is a -100 where there is nothing to predict.
         """
-
         attn_mask = torch.arange(tok_ids.size(1), dtype=torch.long, device=lengths.device) < lengths[:, None]
 
         bs, max_seq_len = tok_ids.size()
@@ -235,10 +224,7 @@ class Distiller:
         )
         pred_mask[tgt_ids] = 1
         pred_mask = pred_mask.view(bs, max_seq_len)
-
         pred_mask[tok_ids == pad_token_id] = 0
-
-     
 
         _token_ids_real = tok_ids[pred_mask]
         _token_ids_rand = _token_ids_real.clone().random_(self.student_vocab_size)
@@ -250,14 +236,33 @@ class Distiller:
             + _token_ids_rand * (probs == 2).long()
         )
         tok_ids = tok_ids.masked_scatter(pred_mask, _tok_ids)
-
-        mlm_labels[~pred_mask] = -100  # previously `mlm_labels[1-pred_mask] = -1`, cf pytorch 1.2.0 compatibility
-
-
+        mlm_labels[~pred_mask] = -100
 
         return tok_ids, attn_mask, mlm_labels
 
- 
+    def prepare_batch(self, batch):
+        batch_cuda = {arg_name: arg_value.to(f"cuda:{self.params.local_rank}") for arg_name, arg_value in batch.items()}
+        batch_cuda['t_attn_mask'] = self.generate_padding_mask(batch_cuda['t_ids'].size(1), batch_cuda['t_lengths'])
+
+
+        if self.alpha_mlm > 0.0 and self.student_token_probs is not None:
+            s_tok_ids, s_attn_mask, s_lm_labels = self.prepare_batch_mlm(batch_cuda['s_ids'], 
+                                                                            batch_cuda['s_lengths'], 
+                                                                            self.params.student_tok_ids['pad_token'], 
+                                                                            self.params.student_tok_ids['mask_token'], 
+                                                                            self.student_token_probs
+                                                                        )
+            batch_cuda['s_ids'] = s_tok_ids
+            batch_cuda['s_lm_labels'] = s_lm_labels                                                            
+        else:
+            s_attn_mask = self.generate_padding_mask(batch_cuda['s_ids'].size(1), batch_cuda['s_lengths'])
+            s_lm_labels = None
+        batch_cuda['s_attn_mask'] = s_attn_mask
+
+        if self.params.t2s_mapping is not None:
+            batch_cuda['t2s_attn_mask'] = self.generate_padding_mask(batch_cuda['t2s_ids'].size(1), 
+                                                                    batch_cuda['t2s_lengths'])
+        return batch_cuda
 
     def train(self):
         """
@@ -277,32 +282,20 @@ class Distiller:
 
             iter_bar = tqdm(self.train_dataloader, desc="-Iter", disable=self.params.local_rank not in [-1, 0])
             for batch in iter_bar:
-                #if self.params.gpus > 0:
-                batch_cuda = tuple(t.to(f"cuda:{self.params.local_rank}") for t in batch)
-                st_tok_ids, st_attn_mask, st_lm_labels = self.prepare_batch_mlm(batch_cuda[1], 
-                                                                                batch_cuda[2], self.params.student_tok_ids['pad_token'], 
-                                                                                self.params.student_tok_ids['mask_token'], self.student_token_probs
-                                                                               )
-
-                t2s_tok_ids, t2s_attn_mask, t2s_lm_labels = self.prepare_batch_mlm(batch_cuda[3], 
-                                                                                   batch_cuda[4], self.params.student_tok_ids['pad_token'],
-                                                                                   self.params.student_tok_ids['mask_token'], 
-                                                                                   self.student_token_probs)
-               
-                self.step(batch_cuda[0],
-                          st_tok_ids, st_attn_mask, st_lm_labels, 
-                          t2s_tok_ids, t2s_attn_mask, t2s_lm_labels, batch_cuda[-1],
-                          grad_on=True)
+                batch_cuda = self.prepare_batch(batch)
+                batch_cuda['grad_on'] = True
+                self.step(**batch_cuda)
                 
                 iter_bar.update()
                 iter_bar.set_postfix(
                     {"Last_loss": f"{self.last_loss:.5f}", "Avg_cum_loss": f"{self.total_loss_epoch/self.n_iter:.2f}"}
                 )
+                
             iter_bar.close()
 
             if self.is_master:
                 logger.info(f"--- Ending epoch {self.epoch}/{self.params.n_epoch-1}")
-
+            
             self.validate()
             self.end_epoch()
 
@@ -310,7 +303,6 @@ class Distiller:
             logger.info("Save very last checkpoint as `pytorch_model.bin`.")
             self.save_checkpoint(checkpoint_name="pytorch_model.bin")
             logger.info("Training is finished")
-
             
     def validate(self):
         self.student.eval()
@@ -319,26 +311,10 @@ class Distiller:
         if self.multi_gpu:
             torch.distributed.barrier()
         iter_bar = tqdm(self.valid_dataloader, desc="-Iter", disable=self.params.local_rank not in [-1, 0])
-
         for batch in iter_bar:
-            #if self.params.gpus > 0:
-            batch_cuda = tuple(t.to(f"cuda:{self.params.local_rank}") for t in batch)
-
-            st_tok_ids, st_attn_mask, st_lm_labels = self.prepare_batch_mlm(batch_cuda[1], 
-                                                                            batch_cuda[2], self.params.student_tok_ids['pad_token'], 
-                                                                            self.params.student_tok_ids['mask_token'], self.student_token_probs
-                                                                           )
-
-            t2s_tok_ids, t2s_attn_mask, t2s_lm_labels = self.prepare_batch_mlm(batch_cuda[3], 
-                                                                            batch_cuda[4], self.params.student_tok_ids['pad_token'], 
-                                                                            self.params.student_tok_ids['mask_token'], self.student_token_probs
-                                                                           )
-
-            loss = self.step(batch_cuda[0], 
-                      st_tok_ids, st_attn_mask, st_lm_labels, 
-                      t2s_tok_ids, t2s_attn_mask, t2s_lm_labels, batch_cuda[-1],
-                      grad_on=False)
-
+            batch_cuda = self.prepare_batch(batch)
+            batch_cuda['grad_on'] = False
+            self.step(**batch_cuda)
             iter_bar.update()
             iter_bar.set_postfix(
                 {"Avg_cum_valid_loss": f"{self.total_valid_loss_epoch/self.n_valid_iter:.2f}"}
@@ -349,125 +325,108 @@ class Distiller:
         if self.is_master:
             logger.info(f"--- Ending validation epoch {self.epoch}/{self.params.n_epoch-1}")
         
-        
-    def step(self, t_tok_ids, 
-             st_tok_ids, st_attn_mask, st_lm_labels, 
-             t2s_tok_ids, t2s_attn_mask, t2s_lm_labels,
-             offset, grad_on: bool=True):
-
-
-        """
-        One optimization step: forward of student AND teacher, backward on the loss (for gradient accumulation),
-        and possibly a parameter update (depending on the gradient accumulation).
-
-        Input:
-        ------
-        input_ids: `torch.tensor(bs, seq_length)` - The token ids.
-        attention_mask: `torch.tensor(bs, seq_length)` - The attention mask for self attention.
-        lm_labels: `torch.tensor(bs, seq_length)` - The language modeling labels (mlm labels for MLM and clm labels for CLM).
-        """
-        
+    def step(self, t_ids=None, t_attn_mask = None, 
+            s_ids=None, s_attn_mask=None, s_lm_labels=None,
+            t2s_ids=None, t2s_attn_mask=None,  
+            student_split_ids=None, teacher_mask=None, student_mask=None,
+            grad_on=True, **kwargs):
         with torch.no_grad():
-            t_out = self.teacher(input_ids=t_tok_ids)
-            t_logits = t_out.logits.detach()
-            t_hidden_states = t_out.hidden_states
-            t_attentions = t_out.attentions
-
-
+            t_out = self.teacher(input_ids=t_ids, attention_mask=t_attn_mask)
+            t_logits = t_out.logits
+        
         with torch.set_grad_enabled(grad_on):
-            s_out = self.student(
-                input_ids=st_tok_ids, attention_mask=st_attn_mask
-            )
+            s_out = self.student(input_ids=s_ids, attention_mask=s_attn_mask)
             s_logits = s_out.logits
-            s_hidden_states = s_out.hidden_states
-            s_attentions = s_out.attentions
 
-            t2s_out = self.student(
-                input_ids=t2s_tok_ids, attention_mask=t2s_attn_mask
-            ) 
-
+        if hasattr(self.params, 't2s_mapping') and self.params.t2s_mapping is not None:
+            with torch.set_grad_enabled(grad_on):
+                t2s_out = self.student(input_ids=t2s_ids, 
+                                        attention_mask=t2s_attn_mask)
             t2s_logits = t2s_out.logits
-            t2s_hidden_states = t2s_out.hidden_states
-            t2s_attentions = t2s_out.attentions
-                                    
-        if self.params.restrict_ce_to_mask:
-            mask = (lm_labels > -1).unsqueeze(-1).expand_as(s_logits)  # (bs, seq_length, voc_size)
-        else:
-            st_attn_mask = st_attn_mask.unsqueeze(-1).expand_as(s_logits)
-            t2s_attn_mask = t2s_attn_mask.unsqueeze(-1).expand_as(t2s_logits)
+            if self.alpha_ce > 0.0:
+                student_mapped_logits = custom_step.map_step(t2s_logits, 
+                                                                student_split_ids, self.params.student_tok_ids['pad_token'], 
+                                                                t2s_vocab_padded=self.params.t2s_vocab_padded, 
+                                                                s2t_vocab_padded=self.params.s2t_vocab_padded)
+                student_mapped_logits = torch.masked_select(student_mapped_logits, 
+                                                            t_attn_mask.unsqueeze(-1).expand_as(student_mapped_logits)).reshape(-1, self.teacher_vocab_size)
+
+                teacher_mapped_logits = torch.masked_select(t_logits, 
+                                                            t_attn_mask.unsqueeze(-1).expand_as(t_logits)).reshape(-1, self.teacher_vocab_size)
+        elif hasattr(self.params, 'matching_ids') and self.alpha_ce:
+                student_mapped_logits = custom_step.match_step(s_logits, student_mask, self.params.student_matched)
+                teacher_mapped_logits = custom_step.match_step(t_logits, teacher_mask, self.params.teacher_matched)
+        if self.alpha_mse > 0.0:
+            t_h = t_out.hidden_states[-1].size(-1)
+            if self.params.projection_strategy == 'average_by_layers':
+                student_hidden_avg = torch.stack(t2s_out.hidden_states).mean(dim=0)
+                teacher_hidden_avg = torch.stack(t_out.hidden_states).mean(dim=0)
+                student_hidden_reduced = custom_step.reduce_seq(student_hidden_avg, student_split_ids, self.params.student_tok_ids['pad_token'])
+                student_hidden_proj = self.hid_projector_mse(student_hidden_reduced)
+                student_hidden_slct = torch.masked_select(student_hidden_proj, t_attn_mask.unsqueeze(-1).expand_as(student_hidden_proj)).reshape(-1, t_h)
+                teacher_hidden_slct = torch.masked_select(teacher_hidden_avg, t_attn_mask.unsqueeze(-1).expand_as(teacher_hidden_avg)).reshape(-1, t_h)
+
         
-        def reduce_student_logits_to_teacher(t2s_logits, idxs_padded):
-            bs, stu_seq_len, stu_voc_size = t2s_logits.shape
-            fake_seq = self.params.student_tok_ids['pad_token'] * torch.ones(bs, 1, stu_voc_size).to(t2s_logits.device)
-            #fake_seq.requires_grad_()
-            padded_seq = torch.cat((t2s_logits, fake_seq), dim=1)
-            batch_idx = torch.tensor([[[i]] for i in range(bs)], dtype=torch.long).to(t2s_logits.device)
-            reduced_seq = torch.sum(padded_seq[batch_idx, idxs_padded], dim=2)
-            return reduced_seq
-        
-        def map_student_logits_to_teacher(reduced_t2s_logits):
-            bs, seq_len, stu_voc_size = reduced_t2s_logits.shape
-            reshaped = reduced_t2s_logits.reshape(-1, stu_voc_size)
-            mapped_logits = torch.sum(reshaped[:,self.params.t2s_vocab_padded], dim=-1).reshape(bs, seq_len, self.teacher_vocab_size)
-            #reshaped.register_hook(set_grad(reshaped))
-            return mapped_logits
-        
-        loss = 0.        
-        #self.temperature.to(device)
+        loss = 0.
         with torch.set_grad_enabled(grad_on):
-            reduced_t2s_logits = reduce_student_logits_to_teacher(t2s_logits, offset)
-            
-            # v1 without MyIndex
             """
-            mapped_t2s_logits = map_student_logits_to_teacher(reduced_t2s_logits)
+                KLDiv loss
             """
+            if self.alpha_ce > 0.0:
+                b_size = student_mapped_logits.size(0)
+                loss_ce = (
+                    self.ce_loss_fct(
+                        F.log_softmax(student_mapped_logits / self.temperature, dim=-1),
+                        F.softmax(teacher_mapped_logits / self.temperature, dim=-1),
+                    )
+                    * self.temperature ** 2
+                    )
+                loss += self.alpha_ce * loss_ce / b_size
+            """
+                MLM loss
+            """
+            if self.alpha_mlm:
+                loss_mlm = self.lm_loss_fct(s_logits.view(-1, s_logits.size(-1)), s_lm_labels.view(-1))
+                loss += self.alpha_mlm * loss_mlm
+            """
+                L2 loss
+            """
+            if self.alpha_mse > 0.0:
+                loss_mse = self.mse_loss_fct(student_hidden_slct, teacher_hidden_slct)
+                loss += self.alpha_mse * loss_mse / b_size
 
-            myindex= MyIndex.apply
-            bs, teacher_seq_len, stu_voc_size = reduced_t2s_logits.shape
-            reshaped = reduced_t2s_logits.reshape(-1, stu_voc_size)
-            teacher_vocab_size = t_logits.size(2)
-
-            mapped_t2s_logits = torch.sum(myindex(reshaped, 
-                                              self.params.t2s_vocab_padded, 
-                                              self.params.s2t_vocab_padded), 
-                                      dim=-1).reshape(bs, teacher_seq_len, teacher_vocab_size)
-          
-
-            loss_ce = (
-            self.ce_loss_fct(
-                F.log_softmax(mapped_t2s_logits / self.temperature, dim=-1),
-                F.softmax(t_logits / self.temperature, dim=-1),
-            )
-            * self.temperature ** 2
-            )
-
-            loss = self.alpha_ce * loss_ce
-
-
-            if self.alpha_mlm > 0.0:
-                loss_mlm = self.lm_loss_fct(s_logits.view(-1, s_logits.size(-1)), st_lm_labels.view(-1))
-                loss = loss + self.alpha_mlm * loss_mlm
-                                    
-            if grad_on:
+        if grad_on:
                 self.total_loss_epoch += loss.item()
                 self.last_loss = loss.item()
-                self.last_loss_ce = loss_ce.item()
+                if self.alpha_ce > 0.0:
+                    self.last_loss_ce = loss_ce.item()
                 if self.alpha_mlm > 0.0:
                     self.last_loss_mlm = loss_mlm.item()
-                    
+                if self.alpha_mse > 0.0:
+                    self.last_loss_mse = loss_mse.item()
+                if self.alpha_cos > 0.0:
+                    self.last_loss_cos = loss_cos.item()
+                if self.alpha_contrastive > 0.0:
+                    self.last_loss_contrastive = loss_contrastive.item()
                 self.optimize(loss)
-                self.n_sequences_epoch += t_tok_ids.size(0)
-            else:
-                self.total_valid_loss_epoch += loss.item()
+                self.n_sequences_epoch += t_ids.size(0)
+        else:
+            self.total_valid_loss_epoch += loss.item()
+            if self.alpha_ce > 0.0:
                 self.last_valid_loss_ce_epoch += loss_ce.item()
-                if self.alpha_mlm > 0.0:
-                    self.last_valid_loss_mlm_epoch += loss_mlm.item()
-                self.n_valid_iter += 1
+            if self.alpha_mlm > 0.0:
+                self.last_valid_loss_mlm_epoch = self.last_valid_loss_mlm_epoch + loss_mlm.item()
+            if self.alpha_mse > 0.0:
+                self.last_valid_loss_mse_epoch += loss_mse.item()
+            if self.alpha_cos > 0.0:
+                self.last_valid_loss_cos_epoch += loss_cos.item()
+            if self.alpha_contrastive > 0.0:
+                self.last_valid_loss_contrastive_epoch += loss_contrastive.item()
+                
+            self.n_valid_iter += 1
 
-        return loss
 
-
-    def optimize(self, loss, grad_on: bool=True):
+    def optimize(self, loss):
         """
         Normalization on the loss (gradient accumulation or distributed training), followed by
         backward pass on the loss, possibly followed by a parameter update (depending on the gradient accumulation).
@@ -485,7 +444,6 @@ class Distiller:
 
         loss.backward()
         self.iter()
-        
         if self.n_iter % self.params.gradient_accumulation_steps == 0:
             torch.nn.utils.clip_grad_norm_(self.student.parameters(), self.params.max_grad_norm)
             self.optimizer.step()
@@ -537,14 +495,25 @@ class Distiller:
         )
         self.tensorboard.add_scalar(tag="losses/loss", scalar_value=self.last_loss, global_step=self.n_total_iter)
         
-        self.tensorboard.add_scalar(
-            tag="losses/loss_ce", scalar_value=self.last_loss_ce, global_step=self.n_total_iter
-        )
-        
-        
+        if self.alpha_ce > 0.0:
+            self.tensorboard.add_scalar(
+                tag="losses/loss_ce", scalar_value=self.last_loss_ce, global_step=self.n_total_iter
+            )        
         if self.alpha_mlm > 0.0:
             self.tensorboard.add_scalar(
                 tag="losses/loss_mlm", scalar_value=self.last_loss_mlm, global_step=self.n_total_iter
+            )
+        if self.alpha_mse > 0.0:
+            self.tensorboard.add_scalar(
+                tag="losses/loss_mse", scalar_value=self.last_loss_mse, global_step=self.n_total_iter
+            )
+        if self.alpha_cos > 0.0:
+            self.tensorboard.add_scalar(
+                tag="losses/loss_cos", scalar_value=self.last_loss_cos, global_step=self.n_total_iter
+            )
+        if self.alpha_contrastive > 0.0:
+            self.tensorboard.add_scalar(
+                tag="losses/loss_contrastive", scalar_value=self.last_loss_contrastive, global_step=self.n_total_iter
             )
         self.tensorboard.add_scalar(
             tag="learning_rate/lr", scalar_value=self.scheduler.get_lr()[0], global_step=self.n_total_iter
@@ -577,11 +546,13 @@ class Distiller:
                 global_step=self.epoch
             )
             self.last_valid_loss_ce_epoch /= self.n_valid_iter
-            self.tensorboard.add_scalar(
-                tag="epoch/valid_ce_loss", scalar_value=self.last_valid_loss_ce_epoch, 
-                global_step=self.epoch
-            )
-            self.last_valid_loss_ce_epoch = 0
+
+            if self.alpha_ce:
+                self.tensorboard.add_scalar(
+                    tag="epoch/valid_ce_loss", scalar_value=self.last_valid_loss_ce_epoch, 
+                    global_step=self.epoch
+                )
+                self.last_valid_loss_ce_epoch = 0
             if self.alpha_mlm > 0.0:
                 self.last_valid_loss_mlm_epoch /= self.n_valid_iter
                 self.tensorboard.add_scalar(
@@ -589,6 +560,27 @@ class Distiller:
                     global_step=self.epoch
                 )
                 self.last_valid_loss_mlm_epoch = 0
+            if self.alpha_mse > 0.0:
+                self.last_valid_loss_mse_epoch /= self.n_valid_iter
+                self.tensorboard.add_scalar(
+                    tag="epoch/valid_mse_loss", scalar_value=self.last_valid_loss_mse_epoch, 
+                    global_step=self.epoch
+                )
+                self.last_valid_loss_mse_epoch = 0
+            if self.alpha_cos > 0.0:
+                self.last_valid_loss_cos_epoch /= self.n_valid_iter
+                self.tensorboard.add_scalar(
+                    tag="epoch/valid_cos_loss", scalar_value=self.last_valid_loss_cos_epoch, 
+                    global_step=self.epoch
+                )
+                self.last_valid_loss_cos_epoch = 0
+            if self.alpha_contrastive > 0.0:
+                self.last_valid_loss_contrastive_epoch /= self.n_valid_iter
+                self.tensorboard.add_scalar(
+                    tag="epoch/valid_contrastive_loss", scalar_value=self.last_valid_loss_contrastive_epoch, 
+                    global_step=self.epoch
+                )
+                self.last_valid_loss_contrastive_epoch /= self.n_valid_iter
             if mean_valid_loss < self.best_total_valid_loss_epoch:
                 self.best_total_valid_loss_epoch = mean_valid_loss
                 self.save_checkpoint(checkpoint_name=f"best_valid.pth")
@@ -614,4 +606,3 @@ class Distiller:
         mdl_to_save.config.save_pretrained(self.dump_path)
         state_dict = mdl_to_save.state_dict()
         torch.save(state_dict, os.path.join(self.dump_path, checkpoint_name))
-

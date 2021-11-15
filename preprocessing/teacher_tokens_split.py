@@ -6,7 +6,6 @@ import pickle
 import progressbar
 import numpy as np
 
-
 student_tokenizer = DistilBertTokenizer.from_pretrained('distilrubert_tiny_cased_convers')
 teacher_tokenizer = BertTokenizer.from_pretrained('ru_convers')
 teacher_config = BertConfig.from_pretrained('ru_convers')
@@ -58,20 +57,16 @@ for k, (teacher_wordpiece, teacher_id) in enumerate(teacher_tokenizer.vocab.item
     
     if '[UNK]' in student_wordpieces:
         student_wordpices = ['UNK']
-    
     teacher2student[teacher_id] = student_tokenizer.convert_tokens_to_ids(student_wordpieces)
 
 with open('teacher2student.pickle', 'wb') as handle:
     pickle.dump(teacher2student, handle)
 
-max_seq_len = max(len(v) for v in teacher2student.values())
-pad_id = student_tokenizer.convert_tokens_to_ids(['[PADT2S]'])[0]
-unk_id = student_tokenizer.convert_tokens_to_ids(['[UNK]'])[0]
-t2s_padded = (np.ones((teacher_config.vocab_size, max_seq_len), dtype=int) * unk_id).tolist()
+max_mapping_len = max(len(v) for v in teacher2student.values())
+pad_id = student_tokenizer.vocab_size
+fill_id = student_tokenizer.convert_tokens_to_ids(['[UNK]'])[0]
+t2s_padded = (np.ones((teacher_config.vocab_size, max_mapping_len), dtype=int) * fill_id).tolist()
 for k, v in teacher2student.items():
-    t2s_padded[k] = v + (max_seq_len - len(v)) * [pad_id]
+    t2s_padded[k] = v + (max_mapping_len - len(v)) * [pad_id]
 with open('t2s_padded.pickle', 'wb') as handle:
     pickle.dump(t2s_padded, handle)
-    
-    
-

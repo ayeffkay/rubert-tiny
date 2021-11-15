@@ -1,6 +1,7 @@
 from argparse import ArgumentParser
 import pickle
 import glob
+from pathlib import Path
 
 
 def main():
@@ -15,8 +16,8 @@ def main():
             shard = pickle.load(f)
             data.extend(shard)
     samples_per_shard = len(data) // args.n_shards
-    for i, file in enumerate(sorted(glob.glob(f'{args.binarized_folder}/*'))):
-        with open(file, 'rb+') as f:
+    for i in range(args.n_shards):
+        with open(Path(args.binarized_folder)/f'shard_{i}.pickle', 'wb') as f:
             pickle.dump(data[i * samples_per_shard: (i + 1) * samples_per_shard], f)
 
 if __name__ == '__main__':

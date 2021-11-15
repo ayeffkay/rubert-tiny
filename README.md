@@ -23,6 +23,8 @@ For training you'll need
 6. `regroup_binarized.py` -- split shards to equal sizes
 7. `token_counts.py` -- compute token ids in processed data
 8. `init_weights.py` -- student initialization
+9. `find_matching_ids.py` -- add mask with matching teacher and student matching ids 
+10. `matched_vocab.py` -- outputs dict of the form `{matched_vocab_token: [teacher_id, student_id]}`
 
 
 ### Training scripts
@@ -35,7 +37,9 @@ Required scripts:
 1. `train.py` -- wrapper to run train
 2. `distiller.py` -- trainer
 3. `lm_seqs_dataset.py` -- batch generator
-4. `grouped_batch_sampler.py` -- group batches by length, to reduce padding
-5. `utils.py` -- auxilary utils for training
-6. `setup_logger.py` -- initialize file logger for few separate scripts to be able to write logs into the same file [optional]
+4. `custom_step.py` -- functions for KLDiv step
+5. `my_index.py` -- backward optimization
+6. `grouped_batch_sampler.py` -- group batches by length, to reduce padding
+7. `utils.py` -- auxilary utils for training
+8. `setup_logger.py` -- initialize file logger for few separate scripts to be able to write logs into the same file [optional]
 
