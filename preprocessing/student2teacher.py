@@ -33,12 +33,13 @@ for st_id, t_idxs in s2t_map.items():
         probs = teacher_probs[t_idxs]
         normalized = np.nan_to_num(probs / np.sum(probs), copy=True, nan=1e-20, posinf=None, neginf=None)
         normalized /= np.sum(normalized)
-        s2t_map_cut[st_id] = np.random.choice(t_idxs, size=30, replace=True, p=normalized).tolist()
+        sample_size = min(np.sum(normalized != 0), 30)
+        s2t_map_cut[st_id] = np.random.choice(t_idxs, size=sample_size, replace=False, p=normalized).tolist()
     
 
 max_seq_len = max(len(v) for v in s2t_map_cut.values())
-fill_token = student_tokenizer.convert_tokens_to_ids(['[UNK]'])[0]
-s2t_padded = fill_token * np.ones((student_tokenizer.vocab_size, max_seq_len), dtype=int)
+fill_token = teacher_vocab_size
+s2t_padded = fill_token * np.ones((student_tokenizer.vocab_size + 1, max_seq_len), dtype=int)
 for i in range(s2t_padded.shape[0]):
     if i in s2t_map_cut:
         s2t_padded[i, :len(s2t_map_cut[i])] = s2t_map_cut[i]
