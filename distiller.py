@@ -347,7 +347,8 @@ class Distiller:
                 student_mapped_logits = custom_step.map_step(t2s_logits, 
                                                                 student_split_ids, self.params.student_tok_ids['pad_token'], 
                                                                 t2s_vocab_padded=self.params.t2s_vocab_padded, 
-                                                                s2t_vocab_padded=self.params.s2t_vocab_padded)
+                                                                s2t_vocab_padded=self.params.s2t_vocab_padded,
+                                                                sum_probs=self.params.sum_probs)
                 student_mapped_logits = torch.masked_select(student_mapped_logits, 
                                                             t_attn_mask.unsqueeze(-1).expand_as(student_mapped_logits)).reshape(-1, self.teacher_vocab_size)
 
