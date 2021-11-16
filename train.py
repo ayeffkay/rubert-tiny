@@ -158,6 +158,8 @@ def main():
     
     parser.add_argument('--t2s_mapping', nargs='?')
 
+    parser.add_argument("--sum_probs", action="store_true", help="sum probabilities instead of logits")
+
     subparsers = parser.add_subparsers(help="Distillation type specific parameters")
     tokens_mapping_parser = subparsers.add_parser('tokens_mapping')
     tokens_mapping_parser.add_argument('--t2s_vocab_padded', nargs='?')

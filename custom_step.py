@@ -9,25 +9,38 @@ def reduce_seq(x, idxs_padded, s_pad_token):
     reduced_seq = torch.sum(padded_seq[batch_idx, idxs_padded], dim=2)
     return reduced_seq
         
-def map_seq(x, t2s_vocab_padded, s2t_vocab_padded=None):
+def map_seq(x, t2s_vocab_padded, s2t_vocab_padded=None, sum_probs=False):
     bs, seq_len, stu_voc_size = x.shape
     reshaped = x.reshape(-1, stu_voc_size)
     reshaped = torch.cat([reshaped, torch.zeros((bs * seq_len, 1), device=x.device)], dim=-1)
     # run without backward optimization
     if s2t_vocab_padded is None:
-        mapped_seq = torch.sum(reshaped[:,t2s_vocab_padded], dim=-1)
+        if sum_probs:
+            mapped_seq = torch.logsumexp(reshaped[:,t2s_vocab_padded], dim=-1)
+        else:
+            mapped_seq = torch.sum(reshaped[:,t2s_vocab_padded], dim=-1)
     # apply backward optimization
     else:
         myindex= MyIndex.apply
-        mapped_seq = torch.sum(myindex(reshaped, t2s_vocab_padded, 
-                                                s2t_vocab_padded), dim=-1)
+        if sum_probs:
+            # todo: use torch.logsumexp, but how to optimize backward?
+            # myindex works only with sum as prev operation:
+            # logsumexp(myindex(reshaped)) ->
+            # -> log(sum(myindex(exp(reshaped))))
+            # z for numeric stability
+            z, _ = torch.max(reshaped, dim=-1, keepdim=True)
+            reshaped = reshaped - z
+            mapped_seq = torch.log(torch.sum(myindex(torch.exp(reshaped), t2s_vocab_padded, s2t_vocab_padded), dim=-1))
+            mapped_seq += z  # might skip this as result goes to softmax
+        else:
+            mapped_seq = torch.sum(myindex(reshaped, t2s_vocab_padded, s2t_vocab_padded), dim=-1)
     mapped_seq = mapped_seq.reshape(bs, -1, len(t2s_vocab_padded))
     return mapped_seq
                                     
 
-def map_step(student_repr, idxs_padded, s_pad_token, t2s_vocab_padded, s2t_vocab_padded=None):
+def map_step(student_repr, idxs_padded, s_pad_token, t2s_vocab_padded, s2t_vocab_padded=None, sum_probs=False):
     reduced_repr = reduce_seq(student_repr, idxs_padded, s_pad_token)
-    mapped_repr = map_seq(reduced_repr, t2s_vocab_padded, s2t_vocab_padded)
+    mapped_repr = map_seq(reduced_repr, t2s_vocab_padded, s2t_vocab_padded, sum_probs=sum_probs)
     return mapped_repr
 
 
