@@ -70,8 +70,8 @@ t2s_padded = (np.ones((teacher_config.vocab_size, max_mapping_len), dtype=int) *
 mapped = []
 for i in range(len(t2s_padded)):
     if i in teacher2student:
-        t2s = teacher2student[k]
-        t2s_padded[k] = t2s + (max_mapping_len - len(t2s)) * [pad_id]
+        t2s = teacher2student[i]
+        t2s_padded[i] = t2s + (max_mapping_len - len(t2s)) * [pad_id]
         mapped.append(i)
 with open('t2s_padded.pickle', 'wb') as f1, open('t2s_mapped_ids.pickle', 'wb') as f2:
     pickle.dump(t2s_padded, f1)
