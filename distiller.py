@@ -353,8 +353,8 @@ class Distiller:
                     student_mapped_logits = student_mapped_logits[:, self.params.t2s_mapped_ids]
                     teacher_mapped_logits = teacher_mapped_logits[:, self.params.t2s_mapped_ids]
         elif hasattr(self.params, 'matching_ids') and self.alpha_ce:
-                student_mapped_logits = custom_step.match_step(s_logits, student_mask, self.params.student_matched)
-                teacher_mapped_logits = custom_step.match_step(t_logits, teacher_mask, self.params.teacher_matched)
+                student_mapped_logits = custom_step.match_step(s_logits, student_mask, 1, self.params.student_matched)
+                teacher_mapped_logits = custom_step.match_step(t_logits, teacher_mask, 1, self.params.teacher_matched)
         if self.alpha_mse > 0.0:
             t_h = t_out.hidden_states[-1].size(-1)
             if self.params.projection_strategy == 'average_by_layers':
