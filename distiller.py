@@ -379,8 +379,8 @@ class Distiller:
                         F.softmax(teacher_mapped_logits / self.temperature, dim=-1),
                     )
                     * self.temperature ** 2
-                    )
-                loss += self.alpha_ce * loss_ce / b_size
+                    ) / b_size
+                loss += self.alpha_ce * loss_ce
             """
                 MLM loss
             """
@@ -391,8 +391,8 @@ class Distiller:
                 L2 loss
             """
             if self.alpha_mse > 0.0:
-                loss_mse = self.mse_loss_fct(student_hidden_slct, teacher_hidden_slct)
-                loss += self.alpha_mse * loss_mse / b_size
+                loss_mse = self.mse_loss_fct(student_hidden_slct, teacher_hidden_slct) / b_size
+                loss += self.alpha_mse * loss_mse
 
         if grad_on:
                 self.total_loss_epoch += loss.item()
