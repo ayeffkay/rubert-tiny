@@ -51,3 +51,7 @@ def match_step(x, mask, true_label, matched_voc_ids=None):
     if matched_voc_ids is not None:
         seq_subset = seq_subset[:, matched_voc_ids]
     return seq_subset
+
+def masked_select_reshape_2d(x, mask, reshape_last_dim):
+    y = torch.masked_select(x, mask.unsqueeze(-1).expand_as(x)).reshape(-1, reshape_last_dim)
+    return y

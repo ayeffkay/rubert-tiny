@@ -75,8 +75,13 @@ def main():
     parser.add_argument(
          "--dump_path", type=str, required=True, help="The output directory (log, checkpoints, parameters, etc.)"
     )
-    parser.add_argument("--binarized_data_folder")
-    parser.add_argument("--student_name", type=str, required=True, help="Path to the student configuration.")
+
+    tb_group = parser.add_argument_group('tensorboard_args')
+    tb_group.add_argument('--tensorboard_logs_path')
+    tb_group.add_argument('--tensorboard_log_name')
+
+    parser.add_argument('--binarized_data_folder')
+    parser.add_argument('--student_name', type=str, required=True, help="Path to the student configuration.")
     parser.add_argument(
         "--student_pretrained_weights", default=None, type=str, help="Load student initialization checkpoint."
     )
@@ -157,7 +162,7 @@ def main():
     parser.add_argument("--valid_prop", type=float, default=0.1)
     
     parser.add_argument('--t2s_mapping', nargs='?')
-
+    parser.add_argument('--t2s_mapped_ids', nargs='?')
     parser.add_argument("--sum_probs", action="store_true", help="sum probabilities instead of logits")
 
     subparsers = parser.add_subparsers(help="Distillation type specific parameters")
@@ -215,7 +220,7 @@ def main():
     Data subset selection for worker
     """
     logger.info(f"Loading data from {args.binarized_data_folder}")
-    shards_slct = select_shards(args.binarized_data_folder, args.gpus, args.local_rank, 1)
+    shards_slct = select_shards(args.binarized_data_folder, args.gpus, args.local_rank)
     train_data = load_data_from_shards(shards_slct)
     
     """
@@ -276,10 +281,15 @@ def main():
     """
     Special t2s/s2t mappings
     """
-    if args.t2s_mapping:
+    if args.t2s_mapping is not None:
         with open(args.t2s_mapping, 'rb') as f:
             args.t2s_mapping = pickle.load(f)
         logger.info("Loaded teacher2student mapping file.")
+
+    if args.t2s_mapped_ids is not None:
+        with open(args.t2s_mapped_ids, 'rb') as f:
+            args.t2s_mapped_ids = torch.tensor(pickle.load(f)).to(f'cuda:{args.local_rank}')
+        logger.info("Loaded mapped teacher tokens.")
     
     if hasattr(args, 't2s_vocab_padded'):
         with open(args.t2s_vocab_padded, 'rb') as f:

@@ -18,9 +18,7 @@ from lm_seqs_dataset import LmSeqsDataset
 from transformers import get_cosine_schedule_with_warmup
 from utils import logger
 import sys
-
-
-from setup_logger import setup_logger
+from pathlib import Path
 import time
 
 try:
@@ -184,7 +182,8 @@ class Distiller:
         self.is_master = params.is_master
         if self.is_master:
             logger.info("--- Initializing Tensorboard")
-            self.tensorboard = SummaryWriter(log_dir=os.path.join(self.dump_path, "log", "train"))
+            Path(self.params.tensorboard_logs_path).mkdir(parents=True, exist_ok=True)
+            self.tensorboard = SummaryWriter(log_dir=os.path.join(self.params.tensorboard_logs_path, self.params.tensorboard_log_name))
             self.tensorboard.add_text(tag="config/training", text_string=str(self.params), global_step=0)
             self.tensorboard.add_text(tag="config/student", text_string=str(self.student_config), global_step=0)
 
@@ -256,7 +255,6 @@ class Distiller:
             batch_cuda['s_lm_labels'] = s_lm_labels                                                            
         else:
             s_attn_mask = self.generate_padding_mask(batch_cuda['s_ids'].size(1), batch_cuda['s_lengths'])
-            s_lm_labels = None
         batch_cuda['s_attn_mask'] = s_attn_mask
 
         if self.params.t2s_mapping is not None:
@@ -349,11 +347,11 @@ class Distiller:
                                                                 t2s_vocab_padded=self.params.t2s_vocab_padded, 
                                                                 s2t_vocab_padded=self.params.s2t_vocab_padded,
                                                                 sum_probs=self.params.sum_probs)
-                student_mapped_logits = torch.masked_select(student_mapped_logits, 
-                                                            t_attn_mask.unsqueeze(-1).expand_as(student_mapped_logits)).reshape(-1, self.teacher_vocab_size)
-
-                teacher_mapped_logits = torch.masked_select(t_logits, 
-                                                            t_attn_mask.unsqueeze(-1).expand_as(t_logits)).reshape(-1, self.teacher_vocab_size)
+                student_mapped_logits = custom_step.masked_select_reshape_2d(student_mapped_logits, t_attn_mask, self.teacher_vocab_size)
+                teacher_mapped_logits = custom_step.masked_select_reshape_2d(t_logits, t_attn_mask, self.teacher_vocab_size)
+                if hasattr(self.params, 't2s_mapped_ids') and self.params.t2s_mapped_ids is not None:
+                    student_mapped_logits = student_mapped_logits[:, self.params.t2s_mapped_ids]
+                    teacher_mapped_logits = teacher_mapped_logits[:, self.params.t2s_mapped_ids]
         elif hasattr(self.params, 'matching_ids') and self.alpha_ce:
                 student_mapped_logits = custom_step.match_step(s_logits, student_mask, self.params.student_matched)
                 teacher_mapped_logits = custom_step.match_step(t_logits, teacher_mask, self.params.teacher_matched)
@@ -364,8 +362,8 @@ class Distiller:
                 teacher_hidden_avg = torch.stack(t_out.hidden_states).mean(dim=0)
                 student_hidden_reduced = custom_step.reduce_seq(student_hidden_avg, student_split_ids, self.params.student_tok_ids['pad_token'])
                 student_hidden_proj = self.hid_projector_mse(student_hidden_reduced)
-                student_hidden_slct = torch.masked_select(student_hidden_proj, t_attn_mask.unsqueeze(-1).expand_as(student_hidden_proj)).reshape(-1, t_h)
-                teacher_hidden_slct = torch.masked_select(teacher_hidden_avg, t_attn_mask.unsqueeze(-1).expand_as(teacher_hidden_avg)).reshape(-1, t_h)
+                student_hidden_slct = custom_step.masked_select_reshape_2d(student_hidden_proj, t_attn_mask, t_h)
+                teacher_hidden_slct = custom_step.masked_select_reshape_2d(teacher_hidden_avg, t_attn_mask, t_h)
 
         
         loss = 0.

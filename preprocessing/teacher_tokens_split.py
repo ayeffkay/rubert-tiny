@@ -64,9 +64,17 @@ with open('teacher2student.pickle', 'wb') as handle:
 
 max_mapping_len = max(len(v) for v in teacher2student.values())
 pad_id = student_tokenizer.vocab_size
-fill_id = student_tokenizer.convert_tokens_to_ids(['[UNK]'])[0]
+#fill_id = student_tokenizer.convert_tokens_to_ids(['[UNK]'])[0]
+fill_id = student_tokenizer.vocab_size
 t2s_padded = (np.ones((teacher_config.vocab_size, max_mapping_len), dtype=int) * fill_id).tolist()
-for k, v in teacher2student.items():
-    t2s_padded[k] = v + (max_mapping_len - len(v)) * [pad_id]
-with open('t2s_padded.pickle', 'wb') as handle:
-    pickle.dump(t2s_padded, handle)
+mapped = []
+for i in range(len(t2s_padded)):
+    if i in teacher2student:
+        t2s = teacher2student[k]
+        t2s_padded[k] = t2s + (max_mapping_len - len(t2s)) * [pad_id]
+        mapped.append(i)
+with open('t2s_padded.pickle', 'wb') as f1, open('t2s_mapped_ids.pickle', 'wb') as f2:
+    pickle.dump(t2s_padded, f1)
+    pickle.dump(mapped, f2)
+    
+
