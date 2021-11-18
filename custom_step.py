@@ -11,8 +11,14 @@ def reduce_seq(x, idxs_padded, s_pad_token):
         
 def map_seq(x, t2s_vocab_padded, s2t_vocab_padded=None, sum_probs=False):
     bs, seq_len, stu_voc_size = x.shape
+    dummy_value = 0.0
+    if sum_probs:
+        # we need -inf here
+        dummy_value = -1e10
+    
     reshaped = x.reshape(-1, stu_voc_size)
-    reshaped = torch.cat([reshaped, torch.zeros((bs * seq_len, 1), device=x.device)], dim=-1)
+    reshaped = torch.cat([reshaped, dummy_value * torch.ones((bs * seq_len, 1), device=x.device)], dim=-1)
+    
     # run without backward optimization
     if s2t_vocab_padded is None:
         if sum_probs:

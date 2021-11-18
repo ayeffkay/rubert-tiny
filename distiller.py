@@ -372,14 +372,28 @@ class Distiller:
                 KLDiv loss
             """
             if self.alpha_ce > 0.0:
-                b_size = student_mapped_logits.size(0)
-                loss_ce = (
-                    self.ce_loss_fct(
-                        F.log_softmax(student_mapped_logits / self.temperature, dim=-1),
-                        F.softmax(teacher_mapped_logits / self.temperature, dim=-1),
-                    )
-                    * self.temperature ** 2
-                    ) / b_size
+                if student_mapped_logits.isinf().sum() >= 1.0:
+                    logger.info('-inf in mapped t2s logits, setting KL loss to 0.0 ...')
+                    logger.debug(t2s_ids.cpu().detach().numpy().tolist())
+                    # 1. skip step (return)
+                    #   number of sync loss.backward() should be equal on all workers
+                    #   - pass skip param to self.optimize?
+                    #   - what should be the value of loss in skipped step?
+                    #   - support correct logging and number of steps counts?
+                    #   - allreduce skip step flag from all workers befor sync .backward() ?
+                    # 2. find the reason of -inf and subsequent nan ?
+                    # 3. use KL with other losses only, set KL to zero -- current workaround
+                    # return
+                    loss_ce = torch.tensor(0.0, device=student_mapped_logits.device)
+                else:    
+                    b_size = student_mapped_logits.size(0)
+                    loss_ce = (
+                        self.ce_loss_fct(
+                            F.log_softmax(student_mapped_logits / self.temperature, dim=-1),
+                            F.softmax(teacher_mapped_logits / self.temperature, dim=-1),
+                        )
+                        * self.temperature ** 2
+                        ) / b_size
                 loss += self.alpha_ce * loss_ce
             """
                 MLM loss
@@ -393,6 +407,9 @@ class Distiller:
             if self.alpha_mse > 0.0:
                 loss_mse = self.mse_loss_fct(student_hidden_slct, teacher_hidden_slct) / b_size
                 loss += self.alpha_mse * loss_mse
+
+            if (loss != loss).data.any():
+                print("NaN detected")
 
         if grad_on:
                 self.total_loss_epoch += loss.item()
@@ -441,7 +458,7 @@ class Distiller:
         if self.params.gradient_accumulation_steps > 1:
             loss = loss / self.params.gradient_accumulation_steps
 
-        loss.backward()
+        loss.backward()  # sync point
         self.iter()
         if self.n_iter % self.params.gradient_accumulation_steps == 0:
             torch.nn.utils.clip_grad_norm_(self.student.parameters(), self.params.max_grad_norm)
