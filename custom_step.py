@@ -55,3 +55,25 @@ def match_step(x, mask, true_label, matched_voc_ids=None):
 def masked_select_reshape_2d(x, mask, reshape_last_dim):
     y = torch.masked_select(x, mask.unsqueeze(-1).expand_as(x)).reshape(-1, reshape_last_dim)
     return y
+
+def average_by_layers(x, split_ids=None, pad_token=0, attn_mask=None):
+    x_avg = torch.stack(x).mean(dim=0)
+    x_avg = average_one(x_avg, split_ids, pad_token, attn_mask)
+    return x_avg
+
+def average_one(x, split_ids=None, pad_token=0, attn_mask=None):
+    last_dim = x.size(-1)
+    if split_ids is not None:
+        x = reduce_seq(x, split_ids, pad_token)
+    if attn_mask is not None:
+        x = masked_select_reshape_2d(x, attn_mask, last_dim)
+    return x
+
+
+def cosine_similarity(teacher, student):
+    teacher_norm = torch.norm(teacher, p=2, dim=1)
+    student_norm = torch.norm(student, p=2, dim=1)
+    prod = torch.bmm(teacher.unsqueeze(1), student.unsqueeze(2)).view(-1)
+    sim = prod / (teacher_norm * student_norm)
+    return sim
+    
