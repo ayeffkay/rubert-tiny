@@ -1,6 +1,7 @@
 import math
 import os
 import time
+import shutil
 
 import psutil
 
@@ -121,7 +122,10 @@ class Distiller:
             self.last_loss_mse = 0
             self.last_valid_loss_mse_epoch = 0
             self.mse_loss_fct = nn.MSELoss(reduction="sum")
-            self.hid_projector_mse = nn.Linear(student.config.hidden_size, teacher.config.hidden_size).to(f'cuda:{params.local_rank}')
+            if self.params.projection_strategy in ['last', 'skip', 'average']:
+                self.hid_projector_mse = nn.ModuleList([nn.Linear(student.config.hidden_size, teacher.config.hidden_size).to(f'cuda:{params.local_rank}') for _ in range(4)])
+            elif self.params.projection_strategy == 'average_by_layers':
+                self.hid_projector_mse = nn.Linear(student.config.hidden_size, teacher.config.hidden_size).to(f'cuda:{params.local_rank}')
         if self.alpha_cos > 0.0:
             self.last_loss_cos = 0
             self.last_valid_loss_cos_epoch = 0
@@ -183,7 +187,10 @@ class Distiller:
         if self.is_master:
             logger.info("--- Initializing Tensorboard")
             Path(self.params.tensorboard_logs_path).mkdir(parents=True, exist_ok=True)
-            self.tensorboard = SummaryWriter(log_dir=os.path.join(self.params.tensorboard_logs_path, self.params.tensorboard_log_name))
+            log_dir = os.path.join(self.params.tensorboard_logs_path, self.params.tensorboard_log_name)
+            if os.path.exists(log_dir):
+                shutil.rmtree(log_dir)
+            self.tensorboard = SummaryWriter(log_dir=log_dir, flush_secs=1)
             self.tensorboard.add_text(tag="config/training", text_string=str(self.params), global_step=0)
             self.tensorboard.add_text(tag="config/student", text_string=str(self.student_config), global_step=0)
 
@@ -352,20 +359,81 @@ class Distiller:
                 if hasattr(self.params, 't2s_mapped_ids') and self.params.t2s_mapped_ids is not None:
                     student_mapped_logits = student_mapped_logits[:, self.params.t2s_mapped_ids]
                     teacher_mapped_logits = teacher_mapped_logits[:, self.params.t2s_mapped_ids]
-        elif hasattr(self.params, 'matching_ids') and self.alpha_ce:
-                student_mapped_logits = custom_step.match_step(s_logits, student_mask, 1, self.params.student_matched)
-                teacher_mapped_logits = custom_step.match_step(t_logits, teacher_mask, 1, self.params.teacher_matched)
-        if self.alpha_mse > 0.0:
-            t_h = t_out.hidden_states[-1].size(-1)
-            if self.params.projection_strategy == 'average_by_layers':
-                student_hidden_avg = torch.stack(t2s_out.hidden_states).mean(dim=0)
-                teacher_hidden_avg = torch.stack(t_out.hidden_states).mean(dim=0)
-                student_hidden_reduced = custom_step.reduce_seq(student_hidden_avg, student_split_ids, self.params.student_tok_ids['pad_token'])
-                student_hidden_proj = self.hid_projector_mse(student_hidden_reduced)
-                student_hidden_slct = custom_step.masked_select_reshape_2d(student_hidden_proj, t_attn_mask, t_h)
-                teacher_hidden_slct = custom_step.masked_select_reshape_2d(teacher_hidden_avg, t_attn_mask, t_h)
+                if self.params.projection_strategy == 'average_by_layers':
+                    teacher_hidden_avg = custom_step.average_by_layers(t_out.hidden_states, attn_mask=t_attn_mask)
+                    student_hidden_avg = custom_step.average_by_layers(t2s_out.hidden_states, student_split_ids, 
+                                                                        self.params.student_tok_ids['pad_token'], 
+                                                                        attn_mask=t_attn_mask)
+        elif hasattr(self.params, 'matching_ids') and self.params.teacher_matched is not None and self.params.student_matched is not None and self.alpha_ce:
+            student_mapped_logits = custom_step.match_step(s_logits, student_mask, 1, self.params.student_matched)
+            teacher_mapped_logits = custom_step.match_step(t_logits, teacher_mask, 1, self.params.teacher_matched)
+            if self.alpha_mse > 0.0:
+                loss_mse = 0.
+                t_hid = t_out.hidden_states
+                s_hid = s_out.hidden_states
+                b_size = t_hid[-1].size(0)
+                t_hid_dim = t_hid[-1].size(-1)
+                s_hid_dim = s_hid[-1].size(-1)
+                if self.params.projection_strategy == 'average':
+                    # align seq len with matched ids
+                    # output from emb layer, should be similar without averaging
+                    s_hid0 = self.hid_projector_mse[0](custom_step.masked_select_reshape_2d(s_hid[0], student_mask==1, s_hid_dim))
+                    t_hid0 = custom_step.masked_select_reshape_2d(t_hid[0], teacher_mask==1, t_hid_dim)
 
-        
+                    loss_mse += self.mse_loss_fct(s_hid0, t_hid0)
+
+                    for i in range(1, 13, 4):
+                        s_hid_i = self.hid_projector_mse[(i + 3) // 4](custom_step.masked_select_reshape_2d(s_hid[(i + 3) // 4], student_mask==1, s_hid_dim))
+                        t_hid_i = custom_step.masked_select_reshape_2d(torch.stack(t_hid[i: (i + 4)]).mean(dim=0), teacher_mask==1, t_hid_dim)
+                        loss_mse += self.mse_loss_fct(s_hid_i, t_hid_i)
+
+                elif self.params.projection_strategy == 'skip':
+                    s_hid0 = self.hid_projector_mse[0](custom_step.masked_select_reshape_2d(s_hid[0], student_mask==1, s_hid_dim))
+                    t_hid0 = custom_step.masked_select_reshape_2d(t_hid[0], teacher_mask==1, t_hid_dim)
+
+                    loss_mse += self.mse_loss_fct(s_hid0, t_hid0)
+
+                    for i in range(4, 13, 4):
+                        s_hid_i = self.hid_projector_mse[i // 4](custom_step.masked_select_reshape_2d(s_hid[i // 4], student_mask==1, s_hid_dim))
+                        t_hid_i = custom_step.masked_select_reshape_2d(t_hid[i], teacher_mask==1, t_hid_dim)
+                        loss_mse += self.mse_loss_fct(s_hid_i, t_hid_i)
+
+                elif self.params.projection_strategy == 'last':
+                    s_hid0 = self.hid_projector_mse[0](custom_step.masked_select_reshape_2d(s_hid[0], student_mask==1, s_hid_dim))
+                    t_hid0 = custom_step.masked_select_reshape_2d(t_hid[0], teacher_mask==1, t_hid_dim)
+
+                    loss_mse += self.mse_loss_fct(s_hid0, t_hid0)
+
+                    for i in range(10, 13):
+                        s_hid_i = self.hid_projector_mse[i - 9](custom_step.masked_select_reshape_2d(s_hid[i - 9], student_mask==1, s_hid_dim))
+                        t_hid_i = custom_step.masked_select_reshape_2d(t_hid[i], teacher_mask==1, t_hid_dim)
+                        loss_mse += self.mse_loss_fct(s_hid_i, t_hid_i)
+
+
+                elif self.params.projection_strategy == 'average_by_layers':
+                    t_avg = custom_step.average_by_layers(t_out.hidden_states, attn_mask=teacher_mask==1)
+                    s_avg = self.hid_projector_mse(custom_step.average_by_layers(s_out.hidden_states, attn_mask=student_mask==1))
+                    loss_mse += self.mse_loss_fct(s_avg, t_avg)
+                loss_mse /= b_size
+
+        """
+        if self.alpha_contrastive > 0.0:
+            student_contrastive_proj = self.hid_projector_contrastive(student_hidden_avg)
+            # loop by b*seq_len
+            t_seq_len = teacher_hidden_avg.size(0)
+            idxs = torch.arange(t_seq_len).to(student_contrastive_proj.device)
+            loss_contrastive = 0.0
+            for i in range(t_seq_len):
+                cur_idxs = torch.cat((idxs[:i + 1], idxs[i+ 1:]))
+                pos = student_contrastive_proj[i]
+                neg = student_contrastive_proj[cur_idxs]
+
+                num = custom_step.cosine_similarity(teacher_hidden_sclt[i], pos)
+                den = num + custom_step.cosine_similarity(teacher_hidden_slct[i], neg)
+
+                loss_contrastive += torch.exp(num) / torch.exp(den)
+            loss_contrastive /= student_hidden_avg.size(0)
+        """
         loss = 0.
         with torch.set_grad_enabled(grad_on):
             """
@@ -405,11 +473,13 @@ class Distiller:
                 L2 loss
             """
             if self.alpha_mse > 0.0:
-                loss_mse = self.mse_loss_fct(student_hidden_slct, teacher_hidden_slct) / b_size
                 loss += self.alpha_mse * loss_mse
 
-            if (loss != loss).data.any():
-                print("NaN detected")
+            """
+                Contrastive loss
+            """
+            if self.alpha_contrastive > 0.0:
+                loss += self.alpha_contrastive * loss_contrastive
 
         if grad_on:
                 self.total_loss_epoch += loss.item()
@@ -622,3 +692,4 @@ class Distiller:
         mdl_to_save.config.save_pretrained(self.dump_path)
         state_dict = mdl_to_save.state_dict()
         torch.save(state_dict, os.path.join(self.dump_path, checkpoint_name))
+        
