@@ -367,11 +367,13 @@ class Distiller:
         elif hasattr(self.params, 'matching_ids') and self.params.teacher_matched is not None and self.params.student_matched is not None and self.alpha_ce:
             student_mapped_logits = custom_step.match_step(s_logits, student_mask, 1, self.params.student_matched)
             teacher_mapped_logits = custom_step.match_step(t_logits, teacher_mask, 1, self.params.teacher_matched)
+            b_size = teacher_mapped_logits.size(0)
+            
             if self.alpha_mse > 0.0:
                 loss_mse = 0.
                 t_hid = t_out.hidden_states
                 s_hid = s_out.hidden_states
-                b_size = t_hid[-1].size(0)
+                
                 t_hid_dim = t_hid[-1].size(-1)
                 s_hid_dim = s_hid[-1].size(-1)
                 if self.params.projection_strategy == 'average':
