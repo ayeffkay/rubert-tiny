@@ -125,7 +125,7 @@ class Distiller:
             if self.params.projection_strategy in ['last', 'skip', 'average']:
                 self.hid_projector_mse = nn.ModuleList([nn.Linear(student.config.hidden_size, teacher.config.hidden_size).to(f'cuda:{params.local_rank}') for _ in range(4)])
             elif self.params.projection_strategy == 'average_by_layers':
-                self.hid_projector_mse = nn.Linear(student.config.hidden_size, teacher.config.hidden_size).to(f'cuda:{params.local_rank}')
+                self.hid_projector_mse = nn.ModuleList([nn.Linear(student.config.hidden_size, teacher.config.hidden_size).to(f'cuda:{params.local_rank}')])
         if self.alpha_cos > 0.0:
             self.last_loss_cos = 0
             self.last_valid_loss_cos_epoch = 0
@@ -133,8 +133,13 @@ class Distiller:
             ## TODO: self.attn_projector
         if self.alpha_contrastive > 0.0:
             self.last_loss_contrastive = 0
-            self.last_valid_loss_contrastive = 0
-            self.hid_projector_contrastive = nn.Linear(student.config.hidden_size, teacher.config.hidden_size)
+            self.last_valid_loss_contrastive_epoch = 0
+            if self.params.t2s_mapping is None:
+                self.cos_sim = nn.CosineSimilarity(dim=1)
+            if self.params.projection_strategy in ['last', 'skip', 'average']:
+                self.hid_projector_contrastive = nn.ModuleList([nn.Linear(student.config.hidden_size, teacher.config.hidden_size).to(f'cuda:{params.local_rank}') for _ in range(4)])
+            elif self.params.projection_strategy == 'average_by_layers':
+                self.hid_projector_contrastive = nn.ModuleList([nn.Linear(student.config.hidden_size, teacher.config.hidden_size).to(f'cuda:{params.local_rank}')])
             
 
         logger.info("--- Initializing model optimizer")
@@ -325,7 +330,6 @@ class Distiller:
                 {"Avg_cum_valid_loss": f"{self.total_valid_loss_epoch/self.n_valid_iter:.2f}"}
             )
         iter_bar.close()
-        
 
         if self.is_master:
             logger.info(f"--- Ending validation epoch {self.epoch}/{self.params.n_epoch-1}")
@@ -343,12 +347,14 @@ class Distiller:
             s_out = self.student(input_ids=s_ids, attention_mask=s_attn_mask)
             s_logits = s_out.logits
 
+        b_size = t_logits.size(0)
+        loss = 0.0
         if hasattr(self.params, 't2s_mapping') and self.params.t2s_mapping is not None:
             with torch.set_grad_enabled(grad_on):
                 t2s_out = self.student(input_ids=t2s_ids, 
                                         attention_mask=t2s_attn_mask)
             t2s_logits = t2s_out.logits
-            if self.alpha_ce > 0.0:
+            if hasattr(self.params, 't2s_vocab_padded') and self.params.t2s_vocab_padded is not None:
                 student_mapped_logits = custom_step.map_step(t2s_logits, 
                                                                 student_split_ids, self.params.student_tok_ids['pad_token'], 
                                                                 t2s_vocab_padded=self.params.t2s_vocab_padded, 
@@ -359,111 +365,113 @@ class Distiller:
                 if hasattr(self.params, 't2s_mapped_ids') and self.params.t2s_mapped_ids is not None:
                     student_mapped_logits = student_mapped_logits[:, self.params.t2s_mapped_ids]
                     teacher_mapped_logits = teacher_mapped_logits[:, self.params.t2s_mapped_ids]
-                if self.params.projection_strategy == 'average_by_layers':
-                    teacher_hidden_avg = custom_step.average_by_layers(t_out.hidden_states, attn_mask=t_attn_mask)
-                    student_hidden_avg = custom_step.average_by_layers(t2s_out.hidden_states, student_split_ids, 
-                                                                        self.params.student_tok_ids['pad_token'], 
-                                                                        attn_mask=t_attn_mask)
-        elif hasattr(self.params, 'matching_ids') and self.params.teacher_matched is not None and self.params.student_matched is not None and self.alpha_ce:
+
+                if self.alpha_ce > 0.0:
+                    b_size = teacher_mapped_logits.size(0)
+                    loss_ce = (
+                        self.ce_loss_fct(
+                            F.log_softmax(student_mapped_logits / self.temperature, dim=-1),
+                            F.softmax(teacher_mapped_logits / self.temperature, dim=-1),
+                        ) * self.temperature ** 2 
+                    ) / b_size
+
+                if self.alpha_mse > 0.0:
+                    s_hid = t2s_out.hidden_states
+                    t_hid = t_out.hidden_states
+                    loss_mse = 0.0
+                    for i, (s, t) in enumerate(custom_step.get_t_s_hiddens(s_hid, t_hid, t_attn_mask, t_attn_mask, 
+                                                                            self.params.projection_strategy, 
+                                                                            true_label=1, student_split_ids=student_split_ids, 
+                                                                            s_pad_token=self.params.student_tok_ids['pad_token'])):
+                        b_size = t.size(0)
+                        s_projected = self.hid_projector_mse[i](s)
+                        loss_mse += self.mse_loss_fct(s_projected, t) / b_size
+                
+                if self.alpha_contrastive > 0.0:
+                    pass
+
+            
+        if hasattr(self.params, 'matching_ids'):
             student_mapped_logits = custom_step.match_step(s_logits, student_mask, 1, self.params.student_matched)
             teacher_mapped_logits = custom_step.match_step(t_logits, teacher_mask, 1, self.params.teacher_matched)
-            b_size = teacher_mapped_logits.size(0)
             
+            if self.alpha_ce > 0.0:
+                b_size = student_mapped_logits.size(0)
+                loss_ce = self.ce_loss_fct(
+                                F.log_softmax(student_mapped_logits / self.temperature, dim=-1),
+                                F.softmax(teacher_mapped_logits / self.temperature, dim=-1),
+                            ) * self.temperature ** 2 / b_size
             if self.alpha_mse > 0.0:
-                loss_mse = 0.
-                t_hid = t_out.hidden_states
                 s_hid = s_out.hidden_states
-                
-                t_hid_dim = t_hid[-1].size(-1)
-                s_hid_dim = s_hid[-1].size(-1)
-                if self.params.projection_strategy == 'average':
-                    # align seq len with matched ids
-                    # output from emb layer, should be similar without averaging
-                    s_hid0 = self.hid_projector_mse[0](custom_step.masked_select_reshape_2d(s_hid[0], student_mask==1, s_hid_dim))
-                    t_hid0 = custom_step.masked_select_reshape_2d(t_hid[0], teacher_mask==1, t_hid_dim)
+                t_hid = t_out.hidden_states
+                loss_mse = 0.0
+                for i, (s, t) in enumerate(custom_step.get_t_s_hiddens(s_hid, t_hid, student_mask, teacher_mask, 
+                                                                            self.params.projection_strategy, 
+                                                                            true_label=1, s_pad_token=self.params.student_tok_ids['pad_token'])):
+                        b_size = t.size(0)
+                        s_projected = self.hid_projector_mse[i](s)
+                        loss_mse += self.mse_loss_fct(s_projected, t) / b_size
 
-                    loss_mse += self.mse_loss_fct(s_hid0, t_hid0)
+            if self.alpha_contrastive > 0.0:
+                loss_contrastive = 0.0
+                s_hid = t2s_out.hidden_states
+                t_hid = t_out.hidden_statesw
+                if self.params.t2s_mapping is not None:
+                    for i, (s, t) in enumerate(custom_step.get_t_s_hiddens(s_hid, t_hid, 
+                                                                            t_attn_mask, t_attn_mask, self.params.projection_strategy, 
+                                                                            1, student_split_ids, self.params.student_tok_ids['pad_token'])):
+                        stud_hid_proj = self.hid_projector_contrastive[i](s)                                       
+                        # loop by b*seq_len
+                        b_seq_len = t.size(0)
+                        idxs = torch.arange(b_seq_len).to(stud_hid_proj.device)
+                        for j in range(b_seq_len):
+                            pos = stud_hid_proj[j]
+                            """
+                            cur_idxs = torch.cat((idxs[:j], idxs[j + 1:]))
+                            neg = stud_hid_proj[cur_idxs]
+                            """
+                            weights = 1 / b_seq_len * torch.ones(b_seq_len)
+                            if hasattr(self.params, 'matching_ids') and self.params.use_mismatched_ids:
+                                # find indices where teacher_mask == 0 -> mismatches
+                                mismatches = (teacher_mask.view(-1) == 0).nonzero(as_tuple=False)
+                                if len(mismatches) > 0:
+                                    weights[mismatches] = 1 / (b_seq_len - len(mismatches))
+                                    weights[~mismatches] = 1 / len(mismatches)
+                            neg = custom_step.negative_sampling(s, t, j, self.params.n_negative_samples, weights.numpy(), self.params.teacher_student_prop, self.params.negative_sampling_strategy)
+                            num = torch.exp(custom_step.cosine_similarity(t[j], pos) / self.temperature)
+                            den = num + torch.exp(custom_step.cosine_similarity(t[j], neg).sum() / self.temperature) + neg.size(0) / self.params.train_cardinality
 
-                    for i in range(1, 13, 4):
-                        s_hid_i = self.hid_projector_mse[(i + 3) // 4](custom_step.masked_select_reshape_2d(s_hid[(i + 3) // 4], student_mask==1, s_hid_dim))
-                        t_hid_i = custom_step.masked_select_reshape_2d(torch.stack(t_hid[i: (i + 4)]).mean(dim=0), teacher_mask==1, t_hid_dim)
-                        loss_mse += self.mse_loss_fct(s_hid_i, t_hid_i)
-
-                elif self.params.projection_strategy == 'skip':
-                    s_hid0 = self.hid_projector_mse[0](custom_step.masked_select_reshape_2d(s_hid[0], student_mask==1, s_hid_dim))
-                    t_hid0 = custom_step.masked_select_reshape_2d(t_hid[0], teacher_mask==1, t_hid_dim)
-
-                    loss_mse += self.mse_loss_fct(s_hid0, t_hid0)
-
-                    for i in range(4, 13, 4):
-                        s_hid_i = self.hid_projector_mse[i // 4](custom_step.masked_select_reshape_2d(s_hid[i // 4], student_mask==1, s_hid_dim))
-                        t_hid_i = custom_step.masked_select_reshape_2d(t_hid[i], teacher_mask==1, t_hid_dim)
-                        loss_mse += self.mse_loss_fct(s_hid_i, t_hid_i)
-
-                elif self.params.projection_strategy == 'last':
-                    s_hid0 = self.hid_projector_mse[0](custom_step.masked_select_reshape_2d(s_hid[0], student_mask==1, s_hid_dim))
-                    t_hid0 = custom_step.masked_select_reshape_2d(t_hid[0], teacher_mask==1, t_hid_dim)
-
-                    loss_mse += self.mse_loss_fct(s_hid0, t_hid0)
-
-                    for i in range(10, 13):
-                        s_hid_i = self.hid_projector_mse[i - 9](custom_step.masked_select_reshape_2d(s_hid[i - 9], student_mask==1, s_hid_dim))
-                        t_hid_i = custom_step.masked_select_reshape_2d(t_hid[i], teacher_mask==1, t_hid_dim)
-                        loss_mse += self.mse_loss_fct(s_hid_i, t_hid_i)
+                            loss_contrastive -= torch.log(num / den)
 
 
-                elif self.params.projection_strategy == 'average_by_layers':
-                    t_avg = custom_step.average_by_layers(t_out.hidden_states, attn_mask=teacher_mask==1)
-                    s_avg = self.hid_projector_mse(custom_step.average_by_layers(s_out.hidden_states, attn_mask=student_mask==1))
-                    loss_mse += self.mse_loss_fct(s_avg, t_avg)
-                loss_mse /= b_size
+                # v0: negative = mismatched
+                else:
+                    all_positive = custom_step.get_t_s_hiddens(s_hid, t_hid, student_mask, teacher_mask, 1, self.projection_strategy)
+                    all_negative = custom_step.get_t_s_hiddens(s_hid, t_hid, student_mask, teacher_mask, 0, self.projection_strategy)
 
-        """
-        if self.alpha_contrastive > 0.0:
-            student_contrastive_proj = self.hid_projector_contrastive(student_hidden_avg)
-            # loop by b*seq_len
-            t_seq_len = teacher_hidden_avg.size(0)
-            idxs = torch.arange(t_seq_len).to(student_contrastive_proj.device)
-            loss_contrastive = 0.0
-            for i in range(t_seq_len):
-                cur_idxs = torch.cat((idxs[:i + 1], idxs[i+ 1:]))
-                pos = student_contrastive_proj[i]
-                neg = student_contrastive_proj[cur_idxs]
+                    for i, (s_p, t_p), (s_n, t_n) in enumerate(zip(all_positive, all_negative)):
+                        b_seq_len1 = t_p.size(0)
+                        b_seq_len2 = t_n.size(0)
 
-                num = custom_step.cosine_similarity(teacher_hidden_sclt[i], pos)
-                den = num + custom_step.cosine_similarity(teacher_hidden_slct[i], neg)
+                        diff = b_seq_len1 - b_seq_len2
+                        # positive count is greater than negative
+                        if diff > 0:
+                            s_hid_dim = s_n.size(1)
+                            pad = self.params.student_tok_ids['pad_token'] * torch.ones(diff, s_hid_dim).to(s_n.device)
+                            s_n = torch.cat((s_n, pad), dim=0)
 
-                loss_contrastive += torch.exp(num) / torch.exp(den)
-            loss_contrastive /= student_hidden_avg.size(0)
-        """
+                        student_hid_pos_proj = self.hid_projector_contrastive[i](s_p)
+                        student_hid_neg_proj = self.hid_projector_contrastive[i](s_n)
+                        num = torch.exp(self.cos_sim(student_hid_pos_proj, t_p))
+                        den = num + torch.exp(self.cos_sim(student_hid_neg_proj, t_p)) + b_seq_len1 / self.params.train_cardinality
+                        loss_contrastive -= torch.log(num / den)
+
         loss = 0.
         with torch.set_grad_enabled(grad_on):
             """
                 KLDiv loss
             """
             if self.alpha_ce > 0.0:
-                if student_mapped_logits.isinf().sum() >= 1.0:
-                    logger.info('-inf in mapped t2s logits, setting KL loss to 0.0 ...')
-                    logger.debug(t2s_ids.cpu().detach().numpy().tolist())
-                    # 1. skip step (return)
-                    #   number of sync loss.backward() should be equal on all workers
-                    #   - pass skip param to self.optimize?
-                    #   - what should be the value of loss in skipped step?
-                    #   - support correct logging and number of steps counts?
-                    #   - allreduce skip step flag from all workers befor sync .backward() ?
-                    # 2. find the reason of -inf and subsequent nan ?
-                    # 3. use KL with other losses only, set KL to zero -- current workaround
-                    # return
-                    loss_ce = torch.tensor(0.0, device=student_mapped_logits.device)
-                else:    
-                    b_size = student_mapped_logits.size(0)
-                    loss_ce = (
-                        self.ce_loss_fct(
-                            F.log_softmax(student_mapped_logits / self.temperature, dim=-1),
-                            F.softmax(teacher_mapped_logits / self.temperature, dim=-1),
-                        )
-                        * self.temperature ** 2
-                        ) / b_size
                 loss += self.alpha_ce * loss_ce
             """
                 MLM loss
@@ -530,7 +538,7 @@ class Distiller:
         if self.params.gradient_accumulation_steps > 1:
             loss = loss / self.params.gradient_accumulation_steps
 
-        loss.backward()  # sync point
+        loss.backward()
         self.iter()
         if self.n_iter % self.params.gradient_accumulation_steps == 0:
             torch.nn.utils.clip_grad_norm_(self.student.parameters(), self.params.max_grad_norm)
@@ -694,4 +702,3 @@ class Distiller:
         mdl_to_save.config.save_pretrained(self.dump_path)
         state_dict = mdl_to_save.state_dict()
         torch.save(state_dict, os.path.join(self.dump_path, checkpoint_name))
-        

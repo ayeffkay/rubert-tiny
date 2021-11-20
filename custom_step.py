@@ -1,5 +1,6 @@
 import torch
 from my_index import MyIndex
+import numpy as np
 
 def reduce_seq(x, idxs_padded, s_pad_token):
     bs, _, stu_voc_size = x.shape
@@ -77,9 +78,76 @@ def average_one(x, split_ids=None, pad_token=0, attn_mask=None):
 
 
 def cosine_similarity(teacher, student):
-    teacher_norm = torch.norm(teacher, p=2, dim=1)
-    student_norm = torch.norm(student, p=2, dim=1)
-    prod = torch.bmm(teacher.unsqueeze(1), student.unsqueeze(2)).view(-1)
+    teacher_norm = torch.norm(teacher, p=2, dim=0)
+    student_norm = torch.norm(student, p=2, dim=1 if len(student.size()) > 1 else 0)
+    prod = torch.matmul(student, teacher)
     sim = prod / (teacher_norm * student_norm)
     return sim
+
+
+def get_t_s_hiddens(s_hid, t_hid, student_mask, teacher_mask, proj_strategy, true_label=1, student_split_ids=None, s_pad_token=0):
+    s_hid_dim = s_hid[-1].size(-1)
+    t_hid_dim = t_hid[-1].size(-1)
+
+    if proj_strategy == 'average':
+        for i in [0] + list(range(1, 13, 4)):
+            s_hid_i = reduce_seq(s_hid[(i + 3) // 4], student_split_ids, s_pad_token) if student_split_ids is not None else s_hid[(i + 3) // 4]
+            s_hid_i = masked_select_reshape_2d(s_hid[i], student_mask==true_label, s_hid_dim)
+            t_hid_i = masked_select_reshape_2d(torch.stack(t_hid[i: (i + 4)]).mean(dim=0), teacher_mask==true_label, t_hid_dim)
+            yield s_hid_i, t_hid_i
+
+    elif proj_strategy == 'skip':
+        for i in [0] + list(range(4, 13, 4)):
+            s_hid_i = reduce_seq(s_hid[i // 4], student_split_ids, s_pad_token) if student_split_ids is not None else s_hid[i // 4]
+            s_hid_i = masked_select_reshape_2d(s_hid_i, student_mask==true_label, s_hid_dim)
+            t_hid_i = masked_select_reshape_2d(t_hid[i], teacher_mask==true_label, t_hid_dim)
+            yield s_hid_i, t_hid_i
+            
+
+    elif proj_strategy == 'last':
+        for i in range(9, 13):
+            s_hid_i = reduce_seq(s_hid[i - 9], student_split_ids, s_pad_token) if student_split_ids is not None else s_hid[i - 9]
+            s_hid_i = masked_select_reshape_2d(s_hid_i, student_mask==true_label, s_hid_dim)
+            t_hid_i = masked_select_reshape_2d(t_hid[i], teacher_mask==true_label, t_hid_dim)
+            yield s_hid_i, t_hid_i
+
+
+    elif proj_strategy == 'average_by_layers':
+        s_avg = average_by_layers(s_hid, student_split_ids, s_pad_token, student_mask==true_label)
+        t_avg = average_by_layers(t_hid, attn_mask=teacher_mask==true_label)
+        for _ in range(1):
+            yield s_avg, t_avg
+
+
+def negative_sampling(s=None, t=None, positive_idx=0, k=-1, weights=None, prop=0.5, sampling_strategy='teacher'):
+    """
+        Negative sampling generation for contrastive loss
+
+        Args:
+            t: teacher representation
+            s: student representation
+            positive_ids: index of positive sample that should be excluded
+            k: number of negative samples (k=-1 to sample all except positive_idx)
+            weights: sampling weights
+            prop: proportion between teacher and student, ignored if sampling is performed from only teacher or only student
+            sampling_strategy: ['teacher', 'student', 'teacher_and_student']
+        Returns:
+            Negative samples for contrastive loss
+
+    """
+    assert t is not None or s is not None
+    b_seq_len = t.size(0) if t is not None else s.size(0)
+    # get all if k == -1 or k is greater than (b_seq_len - 1)
+    k = min(k, b_seq_len - 1) if k != -1 else b_seq_len - 1
+    idxs = np.arange(b_seq_len)
+    idxs = np.stack((idxs[:positive_idx], idxs[positive_idx + 1:]))
+    idxs = torch.from_numpy(np.random.choice(idxs, size=k, replace=False, p=weights))
+    if sampling_strategy == 'teacher' and t is not None:
+        return t[idxs]
+    if sampling_strategy == 'student' and s is not None:
+        return s[idxs]
+    if sampling_strategy == 'teacher_and_student' and t is not None and s is not None:
+        n = len(idxs)
+        l1 = int(prop * n)
+        return torch.cat((t[idxs[:l1]], s[idxs[l1:]]), dim=0)
     

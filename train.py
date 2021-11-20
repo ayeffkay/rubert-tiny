@@ -127,7 +127,13 @@ def main():
     parser.add_argument(
         "--alpha_cos", default=0.0, type=float, help="Linear weight of the cosine embedding loss. Must be >=0."
     )
-    parser.add_argument("--alpha_contrastive", default=0.0, type=float)
+
+    contrastive = parser.add_argument_group('contrastive_loss')
+    contrastive.add_argument('--alpha_contrastive', default=0.0, type=float)
+    contrastive.add_argument('--use_mismatched_ids', action='store_true')
+    contrastive.add_argument('--n_negative_samples', type=int, default=-1)
+    contrastive.add_argument('--teacher_student_prop', nargs='?', type=float, default=0.5)
+    contrastive.add_argument('--negative_sampling_strategy', choices=['teacher', 'student', 'teacher_and_student', None], default=None)
 
     parser.add_argument("--teacher_token_counts", nargs='?', type=str, help="The token counts in the data_file for MLM.")
     parser.add_argument("--student_token_counts", nargs='?')
@@ -243,6 +249,8 @@ def main():
     m = int(args.valid_prop * n)
     valid_data = train_data[n - m:]
     train_data = train_data[:n - m]
+    args.train_cardinality = len(train_data)
+    args.valid_cardinality = len(valid_data)
     train_lm_seq_dataset = LmSeqsDataset(params=args, all_tokens=train_data)
     valid_lm_seq_dataset = LmSeqsDataset(params=args, all_tokens=valid_data)
     
