@@ -415,7 +415,7 @@ class Distiller:
             if self.alpha_contrastive > 0.0:
                 loss_contrastive = 0.0
                 s_hid = t2s_out.hidden_states
-                t_hid = t_out.hidden_statesw
+                t_hid = t_out.hidden_states
                 if self.params.t2s_mapping is not None:
                     for i, (s, t) in enumerate(custom_step.get_t_s_hiddens(s_hid, t_hid, 
                                                                             t_attn_mask, t_attn_mask, self.params.projection_strategy, 
@@ -423,13 +423,8 @@ class Distiller:
                         stud_hid_proj = self.hid_projector_contrastive[i](s)                                       
                         # loop by b*seq_len
                         b_seq_len = t.size(0)
-                        idxs = torch.arange(b_seq_len).to(stud_hid_proj.device)
                         for j in range(b_seq_len):
                             pos = stud_hid_proj[j]
-                            """
-                            cur_idxs = torch.cat((idxs[:j], idxs[j + 1:]))
-                            neg = stud_hid_proj[cur_idxs]
-                            """
                             weights = 1 / b_seq_len * torch.ones(b_seq_len)
                             if hasattr(self.params, 'matching_ids') and self.params.use_mismatched_ids:
                                 # find indices where teacher_mask == 0 -> mismatches
@@ -437,9 +432,11 @@ class Distiller:
                                 if len(mismatches) > 0:
                                     weights[mismatches] = 1 / (b_seq_len - len(mismatches))
                                     weights[~mismatches] = 1 / len(mismatches)
-                            neg = custom_step.negative_sampling(s, t, j, self.params.n_negative_samples, weights.numpy(), self.params.teacher_student_prop, self.params.negative_sampling_strategy)
-                            num = torch.exp(custom_step.cosine_similarity(t[j], pos) / self.temperature)
-                            den = num + torch.exp(custom_step.cosine_similarity(t[j], neg).sum() / self.temperature) + neg.size(0) / self.params.train_cardinality
+                            neg = custom_step.negative_sampling(stud_hid_proj, t, j, self.params.n_negative_samples, 
+                                                                weights.numpy(), self.params.teacher_student_prop, 
+                                                                self.params.negative_sampling_strategy)
+                            num = torch.exp(custom_step.cosine_similarity(pos, t[j]) / self.temperature)
+                            den = num + torch.exp(custom_step.cosine_similarity(neg, t[j]).sum() / self.temperature) + neg.size(0) / self.params.train_cardinality
 
                             loss_contrastive -= torch.log(num / den)
 

@@ -77,7 +77,7 @@ def average_one(x, split_ids=None, pad_token=0, attn_mask=None):
     return x
 
 
-def cosine_similarity(teacher, student):
+def cosine_similarity(student, teacher):
     teacher_norm = torch.norm(teacher, p=2, dim=0)
     student_norm = torch.norm(student, p=2, dim=1 if len(student.size()) > 1 else 0)
     prod = torch.matmul(student, teacher)
@@ -139,8 +139,10 @@ def negative_sampling(s=None, t=None, positive_idx=0, k=-1, weights=None, prop=0
     b_seq_len = t.size(0) if t is not None else s.size(0)
     # get all if k == -1 or k is greater than (b_seq_len - 1)
     k = min(k, b_seq_len - 1) if k != -1 else b_seq_len - 1
-    idxs = np.arange(b_seq_len)
-    idxs = np.stack((idxs[:positive_idx], idxs[positive_idx + 1:]))
+    idxs = np.delete(np.arange(b_seq_len), positive_idx)
+    weights = np.delete(weights, positive_idx)
+    # normalize again for probs sum to 1
+    weights /= np.sum(weights)
     idxs = torch.from_numpy(np.random.choice(idxs, size=k, replace=False, p=weights))
     if sampling_strategy == 'teacher' and t is not None:
         return t[idxs]
@@ -150,4 +152,3 @@ def negative_sampling(s=None, t=None, positive_idx=0, k=-1, weights=None, prop=0
         n = len(idxs)
         l1 = int(prop * n)
         return torch.cat((t[idxs[:l1]], s[idxs[l1:]]), dim=0)
-    
