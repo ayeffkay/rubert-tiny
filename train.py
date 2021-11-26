@@ -226,8 +226,8 @@ def main():
     Data subset selection for worker
     """
     logger.info(f"Loading data from {args.binarized_data_folder}")
-    shards_slct = select_shards(args.binarized_data_folder, args.gpus, args.local_rank)
-    train_data = load_data_from_shards(shards_slct)
+    shards_slct = select_shards(args.binarized_data_folder, args.gpus, args.local_rank, 1)
+    train_data = load_data_from_shards(shards_slct)[:100000]
     
     """
     Counting probs for MLM
