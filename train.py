@@ -131,6 +131,7 @@ def main():
     contrastive = parser.add_argument_group('contrastive_loss')
     contrastive.add_argument('--alpha_contrastive', default=0.0, type=float)
     contrastive.add_argument('--use_mismatched_ids', action='store_true')
+    contrastive.add_argument('--from_one_sample', action='store_true')
     contrastive.add_argument('--n_negative_samples', type=int, default=-1)
     contrastive.add_argument('--teacher_student_prop', nargs='?', type=float, default=0.5)
     contrastive.add_argument('--negative_sampling_strategy', choices=['teacher', 'student', 'teacher_and_student', None], default=None)
@@ -172,13 +173,14 @@ def main():
     parser.add_argument("--sum_probs", action="store_true", help="sum probabilities instead of logits")
 
     subparsers = parser.add_subparsers(help="Distillation type specific parameters")
-    tokens_mapping_parser = subparsers.add_parser('tokens_mapping')
+    tokens_mapping_parser = subparsers.add_parser('kl_tokens_mapping')
     tokens_mapping_parser.add_argument('--t2s_vocab_padded', nargs='?')
     tokens_mapping_parser.add_argument('--s2t_vocab_padded', nargs='?')
 
-    matched_tokens_parser = subparsers.add_parser('matched_tokens')
+    matched_tokens_parser = subparsers.add_parser('kl_matched_tokens')
     matched_tokens_parser.add_argument('--matching_ids', nargs='?')
 
+    parser.add_argument('--align_hiddens', choices=['match', 'reduce', None], default=None)
 
     args = parser.parse_args()
     init_gpu_params(args)
@@ -227,7 +229,7 @@ def main():
     """
     logger.info(f"Loading data from {args.binarized_data_folder}")
     shards_slct = select_shards(args.binarized_data_folder, args.gpus, args.local_rank, 1)
-    train_data = load_data_from_shards(shards_slct)[:100000]
+    train_data = load_data_from_shards(shards_slct)
     
     """
     Counting probs for MLM

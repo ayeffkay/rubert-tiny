@@ -24,9 +24,10 @@ python -m torch.distributed.launch \
     --teacher_name ru_convers \
     --temperature 2 \
     --alpha_ce 2.0 --alpha_mlm 0.5 --alpha_mse 0.1 --projection_strategy skip \
+    --align_hiddens match \
     --student_token_counts student_counts.pickle \
     --n_epoch 128 --batch_size 4 --group_by_size \
     --gradient_accumulation_steps 128 \
     --learning_rate 1e-5 --gpus $WORLD_SIZE \
     --seed 42 --log_interval 500 \
-    matched_tokens --matching_ids matched_tokens.pickle
+    kl_matched_tokens --matching_ids matched_tokens.pickle
