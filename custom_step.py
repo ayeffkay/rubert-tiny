@@ -1,6 +1,7 @@
 import torch
 from my_index import MyIndex
 import numpy as np
+import torch.nn.functional as F
 
 def reduce_seq(x, idxs_padded, s_pad_token):
     bs, _, stu_voc_size = x.shape
@@ -85,7 +86,134 @@ def cosine_similarity(student, teacher):
     return sim
 
 
-def get_t_s_hiddens(s_hid, t_hid, student_mask, teacher_mask, proj_strategy, true_label=1, student_split_ids=None, s_pad_token=0):
+def ce_step(student_logits, teacher_logits, ce_loss_fct, temperature=1):
+        b_size = student_logits.size(0)
+        if student_logits.isinf().sum() >= 1.0:
+            #logger.info('-inf in mapped t2s logits, setting KL loss to 0.0 ...')
+            #logger.debug(t2s_ids.cpu().detach().numpy().tolist())
+            # 1. skip step (return)
+            #   number of sync loss.backward() should be equal on all workers
+            #   - pass skip param to self.optimize?
+            #   - what should be the value of loss in skipped step?
+            #   - support correct logging and number of steps counts?
+            #   - allreduce skip step flag from all workers befor sync .backward() ?
+            # 2. find the reason of -inf and subsequent nan ?
+            # 3. use KL with other losses only, set KL to zero -- current workaround
+            # return
+            loss_ce = torch.tensor(0.0, device=student_logits.device)
+        else:    
+            loss_ce = (
+                ce_loss_fct(
+                    F.log_softmax(student_logits / temperature, dim=-1),
+                    F.softmax(teacher_logits / temperature, dim=-1),
+                ) * temperature ** 2
+            ) / b_size
+        return loss_ce
+
+
+def mse_step(hid_projectors_mse, mse_loss_fct, 
+            s_hid, t_hid, s_mask, t_mask, true_label=1, 
+            proj_strategy=None, student_split_ids=None, s_pad_token=0):
+    loss_mse = 0.0
+    for i, (s, t) in enumerate(get_t_s_hiddens(s_hid, t_hid, s_mask, t_mask, true_label, 
+                                                proj_strategy, student_split_ids, s_pad_token)):
+        b_size = t.size(0)
+        s_projected = hid_projectors_mse[i](s)
+        loss_mse += mse_loss_fct(s_projected, t) / b_size
+    return loss_mse
+
+
+def contrastive_step(train_cardinality, hid_projectors_contrastive, s_hid, t_hid, 
+                        s_mask, t_mask, false_label=0, true_label=1, 
+                        proj_strategy=None, student_split_ids=None, 
+                        s_pad_token=0, 
+                        negative_sampling_strategy='student', use_mismatched_ids=False, 
+                        n_negative_samples=-1, teacher_student_prop=0.5, temperature=1,
+                        from_one_sample=False
+                    ):
+    """"
+        from_one_sample -- make sampling from current sample only, not from all batch
+
+    """
+    loss_contrastive = 0.0
+    # t_mask.sum(dim=1) will give the same, as number of samples is aligned
+    if from_one_sample:
+        match_paddings = s_mask==1
+        seq_len = match_paddings.sum(dim=1)
+
+    for i, (s, t) in enumerate(get_t_s_hiddens(s_hid, t_hid, s_mask, t_mask, true_label, 
+                                                proj_strategy, student_split_ids, s_pad_token)):
+        stud_hid_proj = hid_projectors_contrastive[i](s)                                       
+        # loop by b*seq_len
+        b_seq_len = t.size(0)
+
+        k = 0; offset = 0
+        for j in range(b_seq_len):
+            pos = stud_hid_proj[j]
+            weights = 1 / b_seq_len * torch.ones(b_seq_len)
+            # BUG: mismatches and weights shapes differ, because teacher and student sequences already aligned
+            # we cannot sample from s or t
+            if use_mismatched_ids:
+                # find indices where teacher_mask == 0 -> mismatches
+                mismatches = (t_mask.view(-1)[t_mask.view(-1) != 2] == false_label).nonzero(as_tuple=False)
+                # as we'll have len(mismatches) less than len(matches), mismatches should obtain greater weights
+                if len(mismatches) > 0:
+                    weights[mismatches] = 1 / (b_seq_len - len(mismatches))
+                    weights[~mismatches] = 1 / len(mismatches)
+
+            if from_one_sample:
+                if j >= offset + seq_len[k].item():
+                    offset += seq_len[k].item()
+                    k += 1
+                j = j % offset if offset > 0 else j    
+                neg = negative_sampling(stud_hid_proj[offset:offset + seq_len[k]], 
+                                        t[offset:offset + seq_len[k]], 
+                                        j, n_negative_samples, 
+                                        weights[offset:offset + seq_len[k]].numpy(), 
+                                        teacher_student_prop, 
+                                        negative_sampling_strategy)
+            else:
+                neg = negative_sampling(stud_hid_proj, t, j, n_negative_samples, 
+                                        weights.numpy(), 
+                                        teacher_student_prop, 
+                                        negative_sampling_strategy)
+
+            num = torch.exp(cosine_similarity(pos, t[j]) / temperature)
+            den = num + torch.exp(cosine_similarity(neg, t[j]) / temperature).sum() + neg.size(0) / train_cardinality
+
+            loss_contrastive -= torch.log(num / den)
+    return loss_contrastive
+
+
+def contrastive_step_v0(train_cardinality, hid_projectors_contrastive, 
+                        s_hid, t_hid, s_mask, t_mask, false_label=0, 
+                        true_label=0, proj_strategy='average_by_layers', 
+                        s_pad_token=0):
+    # v0: negative = mismatched
+    loss_contrastive = 0.
+    all_positive = get_t_s_hiddens(s_hid, t_hid, s_mask, t_mask, true_label, proj_strategy)
+    all_negative = get_t_s_hiddens(s_hid, t_hid, s_mask, t_mask, false_label, proj_strategy)
+
+    for i, (s_p, t_p), (s_n, t_n) in enumerate(zip(all_positive, all_negative)):
+        b_seq_len1 = t_p.size(0)
+        b_seq_len2 = t_n.size(0)
+
+        diff = b_seq_len1 - b_seq_len2
+        # positive count is greater than negative
+        if diff > 0:
+            s_hid_dim = s_n.size(1)
+            pad = s_pad_token * torch.ones(diff, s_hid_dim).to(s_n.device)
+            s_n = torch.cat((s_n, pad), dim=0)
+
+        student_hid_pos_proj = hid_projectors_contrastive[i](s_p)
+        student_hid_neg_proj = hid_projectors_contrastive[i](s_n)
+        num = torch.exp(F.cosine_similarity(student_hid_pos_proj, t_p, dim=1))
+        den = num + torch.exp(F.cosine_similarity(student_hid_neg_proj, t_p, dim=1)) + b_seq_len1 / train_cardinality
+        loss_contrastive -= torch.log(num / den)
+    return loss_contrastive
+
+
+def get_t_s_hiddens(s_hid, t_hid, student_mask, teacher_mask, true_label=1, proj_strategy=None, student_split_ids=None, s_pad_token=0):
     s_hid_dim = s_hid[-1].size(-1)
     t_hid_dim = t_hid[-1].size(-1)
 
