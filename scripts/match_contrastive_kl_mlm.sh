@@ -29,6 +29,7 @@ python -m torch.distributed.launch \
     --student_token_counts student_counts.pickle \
     --n_epoch 64 --batch_size 2 --group_by_size \
     --gradient_accumulation_steps 128 \
-    --learning_rate 4e-5 --gpus $WORLD_SIZE \
+    --learning_rate 4e-5 --valid_epochs_patience 3 --reduce_factor 1e-1 \
+    --gpus $WORLD_SIZE \
     --seed 42 --log_interval 256 \
     kl_matched_tokens --matching_ids matched_tokens.pickle

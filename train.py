@@ -156,6 +156,8 @@ def main():
     parser.add_argument("--warmup_prop", default=0.05, type=float, help="Linear warmup proportion.")
     parser.add_argument("--weight_decay", default=0.0, type=float, help="Weight deay if we apply some.")
     parser.add_argument("--learning_rate", default=5e-4, type=float, help="The initial learning rate for Adam.")
+    parser.add_argument("--valid_epochs_patience", type=int, default=3)
+    parser.add_argument("--reduce_factor", type=float, default=1e-1)
     parser.add_argument("--adam_epsilon", default=1e-6, type=float, help="Epsilon for Adam optimizer.")
     parser.add_argument("--max_grad_norm", default=5.0, type=float, help="Max gradient norm.")
     parser.add_argument("--initializer_range", default=0.02, type=float, help="Random initialization range.")

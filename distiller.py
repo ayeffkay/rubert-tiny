@@ -182,7 +182,7 @@ class Distiller:
         self.const_scheduler_with_warmup = get_constant_schedule_with_warmup(self.optimizer, 
                                                          num_warmup_steps=self.warmup_steps)
         self.reduce_on_plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='min', 
-                                                                            factor=5e-1, patience=self.params.warmup_prop * self.params.valid_cardinality, 
+                                                                            factor=params.reduce_factor, patience=params.valid_epochs_patience, 
                                                                             threshold=1e-1, 
                                                                             eps=1e-10, min_lr=1e-10, verbose=True)
 
@@ -337,6 +337,8 @@ class Distiller:
                 {"Avg_cum_valid_loss": f"{self.total_valid_loss_epoch/self.n_valid_iter_epoch:.2f}"}
             )
         iter_bar.close()
+        if self.n_gradient_updates_total > self.warmup_steps:
+                self.reduce_on_plateau.step(self.total_valid_loss_epoch/self.n_valid_iter_epoch)
 
         if self.is_master:
             logger.info(f"--- Ending validation epoch {self.epoch}/{self.params.n_epoch-1}")
@@ -486,8 +488,6 @@ class Distiller:
                 self.last_valid_loss_contrastive_epoch += loss_contrastive.item()
                 
             self.n_valid_iter_epoch += 1
-            if self.n_gradient_updates_total > self.warmup_steps:
-                self.reduce_on_plateau.step(loss)
 
 
     def optimize(self, loss):
