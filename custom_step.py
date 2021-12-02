@@ -140,7 +140,6 @@ def contrastive_step(train_cardinality, hid_projectors_contrastive, s_hid, t_hid
     if from_one_sample:
         match_paddings = s_mask==1
         seq_len = match_paddings.sum(dim=1)
-
     for i, (s, t) in enumerate(get_t_s_hiddens(s_hid, t_hid, s_mask, t_mask, true_label, 
                                                 proj_strategy, student_split_ids, s_pad_token)):
         stud_hid_proj = hid_projectors_contrastive[i](s)                                       
@@ -280,3 +279,4 @@ def negative_sampling(s=None, t=None, positive_idx=0, k=-1, weights=None, prop=0
         n = len(idxs)
         l1 = int(prop * n)
         return torch.cat((t[idxs[:l1]], s[idxs[l1:]]), dim=0)
+

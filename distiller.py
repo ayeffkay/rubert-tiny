@@ -97,7 +97,7 @@ class Distiller:
                 self.student_token_probs = params.student_token_probs.to(f"cuda:{params.local_rank}") if params.gpus > 0 else params.student_token_probs
             else:
                 self.student_token_probs = None
-            
+
         self.epoch = 0
 
         self.n_train_iter_epoch = 0
@@ -179,6 +179,7 @@ class Distiller:
             int(self.num_steps_epoch / params.gradient_accumulation_steps * params.n_epoch) + 1
         )
         self.warmup_steps = math.ceil(num_train_optimization_steps * params.warmup_prop)
+        #self.warmup_steps = 1000
         self.const_scheduler_with_warmup = get_constant_schedule_with_warmup(self.optimizer, 
                                                          num_warmup_steps=self.warmup_steps)
         self.reduce_on_plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='min', 
@@ -424,7 +425,7 @@ class Distiller:
                                                                 self.params.teacher_student_prop, 
                                                                 self.temperature, self.params.from_one_sample)
         # no alignment strategy for hiddens specified
-        elif self.params.align_hidden_states is None and hasattr(self.params, 'matching_ids'):
+        elif self.params.align_hidden_states is None and hasattr(self.params, 'kl_matching_ids'):
             if self.alpha_contrastive > 0.0:
                 loss_contrastive = custom_step.contrastive_step_v0(self.params.train_cardinality, 
                                                                 self.hid_projector_contrastive, 
