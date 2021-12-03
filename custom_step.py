@@ -152,19 +152,19 @@ def contrastive_step(train_cardinality, hid_projectors_contrastive, s_hid, t_hid
         # loop by b*seq_len
         b_seq_len = t.size(0)
 
-        k = 0; offset = 0
+        k = 0; offset = 0; ct_mismatched = 0
         if use_mismatched_ids:
-            cur_mismatches = hid_projectors_contrastive[i](mismatches.next()[0])
-            s = torch.cat((s, cur_mismatches), dim=0)
+            cur_mismatches = hid_projectors_contrastive[i](next(mismatches)[0])
+            stud_hid_proj = torch.cat((stud_hid_proj, cur_mismatches), dim=0)
             ct_mismatched = cur_mismatches.size(0)
         for j in range(b_seq_len):
             pos = stud_hid_proj[j]
-            weights = 1 / b_seq_len * torch.ones(b_seq_len)
+            weights = 1 / b_seq_len * torch.ones(b_seq_len + ct_mismatched)
             # BUG: probably fixed, but not tested
             if use_mismatched_ids and ct_mismatched > 0:
-                # ct_mismatched is less than b_seq_len - ct_mismatched, so mismatches obtain greater weights
+                # ct_mismatched is less than b_seq_len, so mismatches obtain greater weights
                 weights[:-ct_mismatched] =  1 / ct_mismatched
-                weights[len(weights) - ct_mismatched:] = 1 / (b_seq_len - ct_mismatched)
+                weights[len(weights) - ct_mismatched:] = 1 / b_seq_len
 
             if from_one_sample:
                 if j >= offset + seq_len[k].item():
@@ -199,9 +199,9 @@ def contrastive_step_v0(train_cardinality, hid_projectors_contrastive,
     all_positive = get_t_s_hiddens(s_hid, t_hid, s_mask, t_mask, true_label, proj_strategy)
     all_negative = get_t_s_hiddens(s_hid, t_hid, s_mask, t_mask, false_label, proj_strategy)
 
-    for i, ((s_p, t_p), (s_n, t_n)) in enumerate(zip(all_positive, all_negative)):
+    for i, ((s_p, t_p), (s_n, _)) in enumerate(zip(all_positive, all_negative)):
         b_seq_len1 = t_p.size(0)
-        b_seq_len2 = t_n.size(0)
+        b_seq_len2 = s_n.size(0)
 
         diff = b_seq_len1 - b_seq_len2
         # positive count is greater than negative
@@ -269,7 +269,7 @@ def negative_sampling(s=None, t=None, positive_idx=0, k=-1, weights=None, prop=0
 
     """
     assert t is not None or s is not None
-    b_seq_len = t.size(0) if t is not None else s.size(0)
+    b_seq_len = t.size(0) if sampling_strategy=='teacher' else s.size(0)
     # get all if k == -1 or k is greater than (b_seq_len - 1)
     k = min(k, b_seq_len - 1) if k != -1 else b_seq_len - 1
     idxs = np.delete(np.arange(b_seq_len), positive_idx)
@@ -285,4 +285,3 @@ def negative_sampling(s=None, t=None, positive_idx=0, k=-1, weights=None, prop=0
         n = len(idxs)
         l1 = int(prop * n)
         return torch.cat((t[idxs[:l1]], s[idxs[l1:]]), dim=0)
-
