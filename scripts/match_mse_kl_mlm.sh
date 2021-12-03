@@ -15,22 +15,20 @@ python -m torch.distributed.launch \
     --node_rank $NODE_RANK \
     train.py \
     --force \
-    --dump_path distilrubert-tiny-reduce-contrastive-kl-mlm-negt2s-avg-all-dump \
-    --tensorboard_logs_path tensorboard_logs_new \
-    --tensorboard_log_name distilrubert-tiny-reduce-contrastive-kl-mlm-negt2s-avg-all-dump \
+    --dump_path distilrubert-tiny-match-mse-kl-mlm-avg-all-dump \
+    --tensorboard_logs_path tensorboard_logs_rubert_tiny_updated \
+    --tensorboard_log_name distilrubert-tiny-match-mse-kl-mlm-neg_s-avg-all \
     --binarized_data_folder processed_binarized \
     --student_name distilrubert_tiny_cased_convers \
     --student_pretrained_weights distilrubert_tiny_weights.pth \
     --teacher_name ru_convers \
     --temperature 2 \
-    --alpha_ce 2.0 --alpha_mlm 0.5 --alpha_contrastive 0.1 --projection_strategy average_by_layers \
-    --align_hiddens reduce --n_negative_samples -1 \
-    --negative_sampling_strategy student \
+    --alpha_ce 2.0 --alpha_mlm 0.5 --alpha_mse 0.1 --projection_strategy average_by_layers \
+    --align_hiddens match \
     --student_token_counts student_counts.pickle \
     --n_epoch 64 --batch_size 4 --group_by_size \
     --gradient_accumulation_steps 128 \
-    --learning_rate 4e-5 --valid_epochs_patience 3 --reduce_factor 5e-1 \
+    --learning_rate 5e-4 --valid_epochs_patience 3 --reduce_factor 5e-1 \
     --gpus $WORLD_SIZE \
     --seed 42 --log_interval 16 \
-    --t2s_mapping teacher2student.pickle \
     kl_matched_tokens --matching_ids matched_tokens.pickle

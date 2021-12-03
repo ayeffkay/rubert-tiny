@@ -15,7 +15,7 @@ from tqdm import tqdm
 
 from grouped_batch_sampler import GroupedBatchSampler, create_lengths_groups
 from lm_seqs_dataset import LmSeqsDataset
-from transformers import get_constant_schedule_with_warmup
+from transformers import get_constant_schedule_with_warmup, get_cosine_schedule_with_warmup
 from utils import logger
 import sys
 from pathlib import Path
@@ -179,13 +179,18 @@ class Distiller:
             int(self.num_steps_epoch / params.gradient_accumulation_steps * params.n_epoch) + 1
         )
         self.warmup_steps = math.ceil(num_train_optimization_steps * params.warmup_prop)
-        #self.warmup_steps = 1000
         self.const_scheduler_with_warmup = get_constant_schedule_with_warmup(self.optimizer, 
                                                          num_warmup_steps=self.warmup_steps)
-        self.reduce_on_plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='min', 
+        self.reduce_on_plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='min', threshold_mode='abs', 
                                                                             factor=params.reduce_factor, patience=params.valid_epochs_patience, 
-                                                                            threshold=1e-1, 
-                                                                            eps=1e-10, min_lr=1e-10, verbose=True)
+                                                                            threshold=1e-2, cooldown=params.valid_epochs_patience, 
+                                                                            eps=1e-10, min_lr=1e-6, verbose=True)
+        
+        """
+        self.scheduler = get_cosine_schedule_with_warmup(
+            self.optimizer, num_warmup_steps=self.warmup_steps, num_training_steps=num_train_optimization_steps
+        )
+        """
 
         if self.multi_gpu:
             logger.info("Using nn.parallel.DistributedDataParallel for distributed training.")
@@ -338,9 +343,10 @@ class Distiller:
                 {"Avg_cum_valid_loss": f"{self.total_valid_loss_epoch/self.n_valid_iter_epoch:.2f}"}
             )
         iter_bar.close()
+        
         if self.n_gradient_updates_total > self.warmup_steps:
                 self.reduce_on_plateau.step(self.total_valid_loss_epoch/self.n_valid_iter_epoch)
-
+        
         if self.is_master:
             logger.info(f"--- Ending validation epoch {self.epoch}/{self.params.n_epoch-1}")
         
@@ -425,7 +431,7 @@ class Distiller:
                                                                 self.params.teacher_student_prop, 
                                                                 self.temperature, self.params.from_one_sample)
         # no alignment strategy for hiddens specified
-        elif self.params.align_hidden_states is None and hasattr(self.params, 'kl_matching_ids'):
+        elif self.params.align_hiddens is None and hasattr(self.params, 'matching_ids'):
             if self.alpha_contrastive > 0.0:
                 loss_contrastive = custom_step.contrastive_step_v0(self.params.train_cardinality, 
                                                                 self.hid_projector_contrastive, 
@@ -444,7 +450,7 @@ class Distiller:
             """
                 MLM loss
             """
-            if self.alpha_mlm:
+            if self.alpha_mlm > 0.0:
                 loss_mlm = self.lm_loss_fct(s_logits.view(-1, s_logits.size(-1)), s_lm_labels.view(-1))
                 loss += self.alpha_mlm * loss_mlm
             """
@@ -518,8 +524,11 @@ class Distiller:
 
             self.n_gradient_updates_epoch += 1
             self.n_gradient_updates_total += 1
+            
             if self.n_gradient_updates_total < self.warmup_steps:
                 self.const_scheduler_with_warmup.step()
+            
+            #self.scheduler.step()
 
             if self.n_gradient_updates_epoch % self.params.log_interval == 0:
                 self.log_tensorboard()
@@ -552,25 +561,25 @@ class Distiller:
             )
 
         self.tensorboard.add_scalar(
-            tag="losses/cum_avg_train_loss_epoch",
+            tag="train_losses/cum_avg_train_loss_epoch",
             scalar_value=self.total_train_loss_epoch / self.n_train_iter_epoch,
             global_step=self.n_gradient_updates_total
         )
         self.tensorboard.add_scalar(
-            tag="losses/cum_avg_train_loss_epoch_samples",
+            tag="train_losses/cum_avg_train_loss_epoch_samples",
             scalar_value=self.total_train_loss_epoch / self.n_train_iter_epoch,
             global_step=self.n_sequences_total
         )
-        self.tensorboard.add_scalar(tag="losses/train_loss", 
+        self.tensorboard.add_scalar(tag="train_losses/train_loss", 
             scalar_value=self.last_train_loss, 
             global_step=self.n_gradient_updates_total
         )
-        self.tensorboard.add_scalar(tag="losses/train_loss_samples", 
+        self.tensorboard.add_scalar(tag="train_losses/train_loss_samples", 
             scalar_value=self.last_train_loss, 
             global_step=self.n_sequences_total
         )
         self.tensorboard.add_scalar(
-            tag="learning_rate/lr", 
+            tag="learning_rate_steps/lr", 
             scalar_value=self.optimizer.param_groups[0]['lr'], 
             global_step=self.n_gradient_updates_total
         )
@@ -586,57 +595,57 @@ class Distiller:
 
         if self.alpha_ce > 0.0:
             self.tensorboard.add_scalar(
-                tag="losses/train_loss_ce", 
+                tag="train_losses/train_loss_ce", 
                 scalar_value=self.last_loss_ce, 
                 global_step=self.n_gradient_updates_total
             )
             self.tensorboard.add_scalar(
-                tag="losses/train_loss_ce_samples", 
+                tag="train_losses/train_loss_ce_samples", 
                 scalar_value=self.last_loss_ce, 
                 global_step=self.n_sequences_total
             )
             
         if self.alpha_mlm > 0.0:
             self.tensorboard.add_scalar(
-                tag="losses/train_loss_mlm", 
+                tag="train_losses/train_loss_mlm", 
                 scalar_value=self.last_loss_mlm, 
                 global_step=self.n_gradient_updates_total
             )
             self.tensorboard.add_scalar(
-                tag="losses/train_loss_mlm_samples", 
+                tag="train_losses/train_loss_mlm_samples", 
                 scalar_value=self.last_loss_mlm, 
                 global_step=self.n_sequences_total
             )
         if self.alpha_mse > 0.0:
             self.tensorboard.add_scalar(
-                tag="losses/train_loss_mse", 
+                tag="train_losses/train_loss_mse", 
                 scalar_value=self.last_loss_mse, 
                 global_step=self.n_gradient_updates_total
             )
             self.tensorboard.add_scalar(
-                tag="losses/train_loss_mse_samples", 
+                tag="train_losses/train_loss_mse_samples", 
                 scalar_value=self.last_loss_mse, 
                 global_step=self.n_sequences_total
             )
         if self.alpha_cos > 0.0:
             self.tensorboard.add_scalar(
-                tag="losses/train_loss_cos", 
+                tag="train_losses/train_loss_cos", 
                 scalar_value=self.last_loss_cos, 
                 global_step=self.n_gradient_updates_total
             )
             self.tensorboard.add_scalar(
-                tag="losses/train_loss_cos_samples", 
+                tag="train_losses/train_loss_cos_samples", 
                 scalar_value=self.last_loss_cos, 
                 global_step=self.n_sequences_total
             )
         if self.alpha_contrastive > 0.0:
             self.tensorboard.add_scalar(
-                tag="losses/train_loss_contrastive", 
+                tag="train_losses/train_loss_contrastive", 
                 scalar_value=self.last_loss_contrastive, 
                 global_step=self.n_gradient_updates_total
             )
             self.tensorboard.add_scalar(
-                tag="losses/train_loss_contrastive_samples", 
+                tag="train_losses/train_loss_contrastive_samples", 
                 scalar_value=self.last_loss_contrastive, 
                 global_step=self.n_sequences_total
             )
@@ -650,6 +659,11 @@ class Distiller:
 
         if self.is_master:
             self.save_checkpoint(checkpoint_name=f"model_epoch_{self.epoch}.pth")
+            self.tensorboard.add_scalar(
+                tag="epoch/learning_rate", 
+                scalar_value=self.optimizer.param_groups[0]['lr'], 
+                global_step=self.epoch + 1
+            )
             self.tensorboard.add_scalar(
                 tag="epoch/train_loss_epoch", scalar_value=self.total_train_loss_epoch / self.n_train_iter_epoch, global_step=self.epoch
             )
