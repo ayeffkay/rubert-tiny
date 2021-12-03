@@ -136,10 +136,16 @@ def contrastive_step(train_cardinality, hid_projectors_contrastive, s_hid, t_hid
 
     """
     loss_contrastive = 0.0
-    # t_mask.sum(dim=1) will give the same, as number of samples is aligned
+
     if from_one_sample:
         match_paddings = s_mask==1
         seq_len = match_paddings.sum(dim=1)
+    # not tested
+    if use_mismatched_ids:
+        mismatches = get_t_s_hiddens(s_hid, t_hid, 
+                                    s_mask, t_mask, 
+                                    false_label, proj_strategy, 
+                                    student_split_ids, s_pad_token)
     for i, (s, t) in enumerate(get_t_s_hiddens(s_hid, t_hid, s_mask, t_mask, true_label, 
                                                 proj_strategy, student_split_ids, s_pad_token)):
         stud_hid_proj = hid_projectors_contrastive[i](s)                                       
@@ -147,18 +153,18 @@ def contrastive_step(train_cardinality, hid_projectors_contrastive, s_hid, t_hid
         b_seq_len = t.size(0)
 
         k = 0; offset = 0
+        if use_mismatched_ids:
+            cur_mismatches = hid_projectors_contrastive[i](mismatches.next()[0])
+            s = torch.cat((s, cur_mismatches), dim=0)
+            ct_mismatched = cur_mismatches.size(0)
         for j in range(b_seq_len):
             pos = stud_hid_proj[j]
             weights = 1 / b_seq_len * torch.ones(b_seq_len)
-            # BUG: mismatches and weights shapes differ, because teacher and student sequences already aligned
-            # we cannot sample from s or t
-            if use_mismatched_ids:
-                # find indices where teacher_mask == 0 -> mismatches
-                mismatches = (t_mask.view(-1)[t_mask.view(-1) != 2] == false_label).nonzero(as_tuple=False)
-                # as we'll have len(mismatches) less than len(matches), mismatches should obtain greater weights
-                if len(mismatches) > 0:
-                    weights[mismatches] = 1 / (b_seq_len - len(mismatches))
-                    weights[~mismatches] = 1 / len(mismatches)
+            # BUG: probably fixed, but not tested
+            if use_mismatched_ids and ct_mismatched > 0:
+                # ct_mismatched is less than b_seq_len - ct_mismatched, so mismatches obtain greater weights
+                weights[:-ct_mismatched] =  1 / ct_mismatched
+                weights[len(weights) - ct_mismatched:] = 1 / (b_seq_len - ct_mismatched)
 
             if from_one_sample:
                 if j >= offset + seq_len[k].item():
@@ -193,7 +199,7 @@ def contrastive_step_v0(train_cardinality, hid_projectors_contrastive,
     all_positive = get_t_s_hiddens(s_hid, t_hid, s_mask, t_mask, true_label, proj_strategy)
     all_negative = get_t_s_hiddens(s_hid, t_hid, s_mask, t_mask, false_label, proj_strategy)
 
-    for i, (s_p, t_p), (s_n, t_n) in enumerate(zip(all_positive, all_negative)):
+    for i, ((s_p, t_p), (s_n, t_n)) in enumerate(zip(all_positive, all_negative)):
         b_seq_len1 = t_p.size(0)
         b_seq_len2 = t_n.size(0)
 
@@ -202,13 +208,13 @@ def contrastive_step_v0(train_cardinality, hid_projectors_contrastive,
         if diff > 0:
             s_hid_dim = s_n.size(1)
             pad = s_pad_token * torch.ones(diff, s_hid_dim).to(s_n.device)
-            s_n = torch.cat((s_n, pad), dim=0)
+            s_n = torch.cat((s_n, pad), dim=0) if b_seq_len2 > 0 else pad
 
         student_hid_pos_proj = hid_projectors_contrastive[i](s_p)
         student_hid_neg_proj = hid_projectors_contrastive[i](s_n)
         num = torch.exp(F.cosine_similarity(student_hid_pos_proj, t_p, dim=1))
-        den = num + torch.exp(F.cosine_similarity(student_hid_neg_proj, t_p, dim=1)) + b_seq_len1 / train_cardinality
-        loss_contrastive -= torch.log(num / den)
+        den = num + torch.exp(F.cosine_similarity(student_hid_neg_proj, t_p, dim=1))
+        loss_contrastive -= torch.log(num.sum() / (den.sum() + b_seq_len1 / train_cardinality))
     return loss_contrastive
 
 
