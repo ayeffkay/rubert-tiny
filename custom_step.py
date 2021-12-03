@@ -160,7 +160,6 @@ def contrastive_step(train_cardinality, hid_projectors_contrastive, s_hid, t_hid
         for j in range(b_seq_len):
             pos = stud_hid_proj[j]
             weights = 1 / b_seq_len * torch.ones(b_seq_len + ct_mismatched)
-            # BUG: probably fixed, but not tested
             if use_mismatched_ids and ct_mismatched > 0:
                 # ct_mismatched is less than b_seq_len, so mismatches obtain greater weights
                 weights[:-ct_mismatched] =  1 / ct_mismatched
@@ -285,3 +284,4 @@ def negative_sampling(s=None, t=None, positive_idx=0, k=-1, weights=None, prop=0
         n = len(idxs)
         l1 = int(prop * n)
         return torch.cat((t[idxs[:l1]], s[idxs[l1:]]), dim=0)
+

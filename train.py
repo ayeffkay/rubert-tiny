@@ -302,12 +302,12 @@ def main():
             args.t2s_mapped_ids = torch.tensor(pickle.load(f)).to(f'cuda:{args.local_rank}')
         logger.info("Loaded mapped teacher tokens.")
     
-    if hasattr(args, 't2s_vocab_padded'):
+    if args.t2s_vocab_padded is not None:
         with open(args.t2s_vocab_padded, 'rb') as f:
             args.t2s_vocab_padded = torch.tensor(pickle.load(f)).to(f'cuda:{args.local_rank}')
         logger.info("Loaded padded teacher2student mapping file")
     
-    if hasattr(args,'s2t_vocab_padded') and args.s2t_vocab_padded is not None:
+    if args.s2t_vocab_padded is not None and args.s2t_vocab_padded is not None:
         with open(args.s2t_vocab_padded, 'rb') as f:
             args.s2t_vocab_padded = torch.tensor(pickle.load(f)).to(f'cuda:{args.local_rank}')
         logger.info("Loaded padded student2teacher mapping file")
@@ -316,7 +316,7 @@ def main():
     """
     Matching tokens loading
     """
-    if hasattr(args, 'matching_ids'):
+    if args.matching_ids is not None:
         teacher_matched, student_matched = get_matched_ts_ids(args.matching_ids)
         args.teacher_matched = torch.tensor(teacher_matched).to(f'cuda:{args.local_rank}')
         args.student_matched = torch.tensor(student_matched).to(f'cuda:{args.local_rank}')

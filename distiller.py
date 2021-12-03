@@ -364,12 +364,12 @@ class Distiller:
             s_logits = s_out.logits
 
         loss = 0.0
-        if hasattr(self.params, 't2s_mapping') and self.params.t2s_mapping is not None:
+        if self.params.t2s_mapping is not None:
             with torch.set_grad_enabled(grad_on):
                 t2s_out = self.student(input_ids=t2s_ids, 
                                         attention_mask=t2s_attn_mask)
             t2s_logits = t2s_out.logits
-            if hasattr(self.params, 't2s_vocab_padded') and self.params.t2s_vocab_padded is not None:
+            if self.params.t2s_vocab_padded is not None:
                 student_mapped_logits = custom_step.map_step(t2s_logits, 
                                                                 student_split_ids, self.params.student_tok_ids['pad_token'], 
                                                                 t2s_vocab_padded=self.params.t2s_vocab_padded, 
@@ -377,14 +377,14 @@ class Distiller:
                                                                 sum_probs=self.params.sum_probs)
                 student_mapped_logits = custom_step.masked_select_reshape_2d(student_mapped_logits, t_attn_mask, self.teacher_vocab_size)
                 teacher_mapped_logits = custom_step.masked_select_reshape_2d(t_logits, t_attn_mask, self.teacher_vocab_size)
-                if hasattr(self.params, 't2s_mapped_ids') and self.params.t2s_mapped_ids is not None:
+                if self.params.t2s_mapped_ids is not None:
                     student_mapped_logits = student_mapped_logits[:, self.params.t2s_mapped_ids]
                     teacher_mapped_logits = teacher_mapped_logits[:, self.params.t2s_mapped_ids]
 
                 if self.alpha_ce > 0.0:
                     loss_ce = custom_step.ce_step(student_mapped_logits, teacher_mapped_logits, self.ce_loss_fct, self.temperature)
         # reduce-map was skipped
-        if hasattr(self.params, 'matching_ids') and self.params.t2s_vocab_padded is None:
+        if self.params.matching_ids is not None and self.params.t2s_vocab_padded is None:
             student_mapped_logits = custom_step.match_step(s_logits, student_mask, 1, self.params.student_matched)
             teacher_mapped_logits = custom_step.match_step(t_logits, teacher_mask, 1, self.params.teacher_matched)
             
@@ -393,7 +393,7 @@ class Distiller:
 
           
         # match strategy, use s outputs
-        if self.params.align_hiddens == 'match' and hasattr(self.params, 'matching_ids'):
+        if self.params.align_hiddens == 'match' and self.params.matching_ids is not None:
             if self.alpha_mse > 0.0:
                 loss_mse = custom_step.mse_step(self.hid_projector_mse, self.mse_loss_fct, 
                                                 s_out.hidden_states, t_out.hidden_states, 
@@ -431,7 +431,7 @@ class Distiller:
                                                                 self.params.teacher_student_prop, 
                                                                 self.temperature, self.params.from_one_sample)
         # no alignment strategy for hiddens specified
-        elif self.params.align_hiddens is None and hasattr(self.params, 'matching_ids'):
+        elif self.params.align_hiddens is None and self.params.matching_ids is not None:
             if self.alpha_contrastive > 0.0:
                 loss_contrastive = custom_step.contrastive_step_v0(self.params.train_cardinality, 
                                                                 self.hid_projector_contrastive, 
