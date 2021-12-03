@@ -33,4 +33,4 @@ python -m torch.distributed.launch \
     --gpus $WORLD_SIZE \
     --seed 42 --log_interval 16 \
     --t2s_mapping teacher2student.pickle \
-    kl_matched_tokens --matching_ids matched_tokens.pickle
+    --matching_ids matched_tokens.pickle

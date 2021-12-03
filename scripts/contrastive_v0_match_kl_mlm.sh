@@ -32,4 +32,4 @@ python -m torch.distributed.launch \
     --learning_rate 5e-4 --valid_epochs_patience 3 --reduce_factor 5e-1 \
     --gpus $WORLD_SIZE \
     --seed 42 --log_interval 16 \
-    kl_matched_tokens --matching_ids matched_tokens.pickle
+    --matching_ids matched_tokens.pickle

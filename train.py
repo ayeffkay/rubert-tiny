@@ -174,13 +174,12 @@ def main():
     parser.add_argument('--t2s_mapped_ids', nargs='?')
     parser.add_argument("--sum_probs", action="store_true", help="sum probabilities instead of logits")
 
-    subparsers = parser.add_subparsers(help="Distillation type specific parameters")
-    tokens_mapping_parser = subparsers.add_parser('kl_tokens_mapping')
-    tokens_mapping_parser.add_argument('--t2s_vocab_padded', nargs='?')
-    tokens_mapping_parser.add_argument('--s2t_vocab_padded', nargs='?')
+    kl_reduce_map_group = parser.add_argument_group(title='reduce-map')
+    kl_reduce_map_group.add_argument('--t2s_vocab_padded', nargs='?')
+    kl_reduce_map_group.add_argument('--s2t_vocab_padded', nargs='?')
 
-    matched_tokens_parser = subparsers.add_parser('kl_matched_tokens')
-    matched_tokens_parser.add_argument('--matching_ids', nargs='?')
+    kl_match_group = parser.add_argument_group(title='match')
+    kl_match_group.add_argument('--matching_ids', nargs='?')
 
     parser.add_argument('--align_hiddens', choices=['match', 'reduce', None], default=None)
 
@@ -230,8 +229,8 @@ def main():
     Data subset selection for worker
     """
     logger.info(f"Loading data from {args.binarized_data_folder}")
-    shards_slct = select_shards(args.binarized_data_folder, args.gpus, args.local_rank)
-    train_data = load_data_from_shards(shards_slct)
+    shards_slct = select_shards(args.binarized_data_folder, args.gpus, args.local_rank, 1)
+    train_data = load_data_from_shards(shards_slct)[:1000]
     
     """
     Counting probs for MLM

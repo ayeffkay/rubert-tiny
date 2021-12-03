@@ -383,8 +383,8 @@ class Distiller:
 
                 if self.alpha_ce > 0.0:
                     loss_ce = custom_step.ce_step(student_mapped_logits, teacher_mapped_logits, self.ce_loss_fct, self.temperature)
-
-        if hasattr(self.params, 'matching_ids'):
+        # reduce-map was skipped
+        if hasattr(self.params, 'matching_ids') and self.params.t2s_vocab_padded is None:
             student_mapped_logits = custom_step.match_step(s_logits, student_mask, 1, self.params.student_matched)
             teacher_mapped_logits = custom_step.match_step(t_logits, teacher_mask, 1, self.params.teacher_matched)
             

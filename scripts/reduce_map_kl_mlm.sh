@@ -33,5 +33,5 @@ python -m torch.distributed.launch \
     --t2s_mapping teacher2student.pickle \
     --t2s_mapped_ids t2s_mapped_ids.pickle \
     --sum_probs \
-    kl_tokens_mapping --t2s_vocab_padded t2s_padded.pickle \
+    --t2s_vocab_padded t2s_padded.pickle \
     --s2t_vocab_padded s2t_padded.pickle
