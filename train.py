@@ -185,6 +185,10 @@ def main():
     parser.add_argument('--align_hiddens', choices=['match', 'reduce', None], default=None)
 
     args = parser.parse_args()
+
+    # as current implementation can't track mismatches which belong to the specified sample
+    assert not(args.use_mismatched_ids and args.from_one_sample)
+
     init_gpu_params(args)
     set_seed(args)
 
@@ -257,7 +261,7 @@ def main():
     args.valid_size = len(valid_data)
 
     args.train_cardinality = sum(len(seq) for seq in train_data)
-    
+
     train_lm_seq_dataset = LmSeqsDataset(params=args, all_tokens=train_data)
     valid_lm_seq_dataset = LmSeqsDataset(params=args, all_tokens=valid_data)
     
