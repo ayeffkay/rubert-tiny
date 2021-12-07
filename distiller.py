@@ -408,7 +408,9 @@ class Distiller:
                                                                 n_negative_samples=self.params.n_negative_samples, 
                                                                 teacher_student_prop=self.params.teacher_student_prop, 
                                                                 temperature=self.temperature, 
-                                                                from_one_sample=self.params.from_one_sample)    
+                                                                from_one_sample=self.params.from_one_sample,
+                                                                add_neg_size_constant=self.params.add_neg_size_constant,
+                                                                )    
         # reduce strategy, use t2s hiddens and t2s mapping
         elif self.params.align_hiddens == 'reduce' and self.params.t2s_mapping is not None:
             if self.alpha_mse > 0.0:
@@ -429,7 +431,8 @@ class Distiller:
                                                                 self.params.use_mismatched_ids, 
                                                                 self.params.n_negative_samples, 
                                                                 self.params.teacher_student_prop, 
-                                                                self.temperature, self.params.from_one_sample)
+                                                                self.temperature, self.params.from_one_sample, 
+                                                                self.params.add_neg_size_constant)
         # no alignment strategy for hiddens specified
         elif self.params.align_hiddens is None and self.params.matching_ids is not None:
             if self.alpha_contrastive > 0.0:

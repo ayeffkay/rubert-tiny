@@ -129,7 +129,7 @@ def contrastive_step(train_cardinality, hid_projectors_contrastive, s_hid, t_hid
                         s_pad_token=0, 
                         negative_sampling_strategy='student', use_mismatched_ids=False, 
                         n_negative_samples=-1, teacher_student_prop=0.5, temperature=1,
-                        from_one_sample=False
+                        from_one_sample=False, add_neg_size_constant=False,
                     ):
     """"
         from_one_sample -- make sampling from current sample only, not from all batch
@@ -184,7 +184,9 @@ def contrastive_step(train_cardinality, hid_projectors_contrastive, s_hid, t_hid
                                         negative_sampling_strategy)
 
             num = torch.exp(cosine_similarity(pos, t[j]) / temperature)
-            den = num + torch.exp(cosine_similarity(neg, t[j]) / temperature).sum() + neg.size(0) / train_cardinality
+            den = num + torch.exp(cosine_similarity(neg, t[j]) / temperature).sum()
+            if add_neg_size_constant:
+                den += neg.size(0) / train_cardinality
             
             layer_contrastive_loss -= torch.log(num / den)
         # we should devide total loss on number of positive samples

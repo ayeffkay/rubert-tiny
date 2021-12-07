@@ -135,6 +135,7 @@ def main():
     contrastive.add_argument('--n_negative_samples', type=int, default=-1)
     contrastive.add_argument('--teacher_student_prop', nargs='?', type=float, default=0.5)
     contrastive.add_argument('--negative_sampling_strategy', choices=['teacher', 'student', 'teacher_and_student', None], default=None)
+    contrastive.add_argument('--add_neg_size_constant', action='store_true')
 
     parser.add_argument("--teacher_token_counts", nargs='?', type=str, help="The token counts in the data_file for MLM.")
     parser.add_argument("--student_token_counts", nargs='?')
