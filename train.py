@@ -253,8 +253,11 @@ def main():
     m = int(args.valid_prop * n)
     valid_data = train_data[n - m:]
     train_data = train_data[:n - m]
-    args.train_cardinality = len(train_data)
-    args.valid_cardinality = len(valid_data)
+    args.train_size = len(train_data)
+    args.valid_size = len(valid_data)
+
+    args.train_cardinality = sum(len(seq) for seq in train_data)
+    
     train_lm_seq_dataset = LmSeqsDataset(params=args, all_tokens=train_data)
     valid_lm_seq_dataset = LmSeqsDataset(params=args, all_tokens=valid_data)
     
