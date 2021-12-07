@@ -153,6 +153,7 @@ def contrastive_step(train_cardinality, hid_projectors_contrastive, s_hid, t_hid
         b_seq_len = t.size(0)
 
         k = 0; offset = 0; ct_mismatched = 0
+        layer_contrastive_loss = 0.0
         if use_mismatched_ids:
             cur_mismatches = hid_projectors_contrastive[i](next(mismatches)[0])
             stud_hid_proj = torch.cat((stud_hid_proj, cur_mismatches), dim=0)
@@ -184,8 +185,12 @@ def contrastive_step(train_cardinality, hid_projectors_contrastive, s_hid, t_hid
 
             num = torch.exp(cosine_similarity(pos, t[j]) / temperature)
             den = num + torch.exp(cosine_similarity(neg, t[j]) / temperature).sum() + neg.size(0) / train_cardinality
+            
+            layer_contrastive_loss -= torch.log(num / den)
+        # we should devide total loss on number of positive samples
+        # currently num_positive_samples == b_seq_len
+        loss_contrastive += layer_contrastive_loss / b_seq_len
 
-            loss_contrastive -= torch.log(num / den)
     return loss_contrastive
 
 
