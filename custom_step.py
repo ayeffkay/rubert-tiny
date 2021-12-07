@@ -199,13 +199,14 @@ def contrastive_step(train_cardinality, hid_projectors_contrastive, s_hid, t_hid
 def contrastive_step_v0(train_cardinality, hid_projectors_contrastive, 
                         s_hid, t_hid, s_mask, t_mask, false_label=0, 
                         true_label=0, proj_strategy='average_by_layers', 
-                        s_pad_token=0):
+                        s_pad_token=0, add_neg_size_constant=False):
     # v0: negative = mismatched
     loss_contrastive = 0.
     all_positive = get_t_s_hiddens(s_hid, t_hid, s_mask, t_mask, true_label, proj_strategy)
     all_negative = get_t_s_hiddens(s_hid, t_hid, s_mask, t_mask, false_label, proj_strategy)
 
     for i, ((s_p, t_p), (s_n, _)) in enumerate(zip(all_positive, all_negative)):
+        layer_contrastive_loss = 0.0
         b_seq_len1 = t_p.size(0)
         b_seq_len2 = s_n.size(0)
 
@@ -218,9 +219,12 @@ def contrastive_step_v0(train_cardinality, hid_projectors_contrastive,
 
         student_hid_pos_proj = hid_projectors_contrastive[i](s_p)
         student_hid_neg_proj = hid_projectors_contrastive[i](s_n)
-        num = torch.exp(F.cosine_similarity(student_hid_pos_proj, t_p, dim=1))
-        den = num + torch.exp(F.cosine_similarity(student_hid_neg_proj, t_p, dim=1))
-        loss_contrastive -= torch.log(num.sum() / (den.sum() + b_seq_len1 / train_cardinality))
+        num = torch.exp(F.cosine_similarity(student_hid_pos_proj, t_p, dim=1)).sum()
+        den = num + torch.exp(F.cosine_similarity(student_hid_neg_proj, t_p, dim=1)).sum()
+        if add_neg_size_constant:
+            den += b_seq_len1 / train_cardinality
+        layer_contrastive_loss -= torch.log(num / den)
+        loss_contrastive += layer_contrastive_loss / b_seq_len1
     return loss_contrastive
 
 

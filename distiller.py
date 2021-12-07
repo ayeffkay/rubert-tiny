@@ -441,7 +441,8 @@ class Distiller:
                                                                 s_out.hidden_states, t_out.hidden_states, 
                                                                 student_mask, teacher_mask, 0, 1, 
                                                                 self.params.projection_strategy, 
-                                                                self.params.student_tok_ids['pad_token'])
+                                                                self.params.student_tok_ids['pad_token'], 
+                                                                self.params.add_neg_size_constant)
 
         loss = 0.
         with torch.set_grad_enabled(grad_on):
