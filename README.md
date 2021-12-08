@@ -37,7 +37,7 @@ Required scripts:
 1. `train.py` -- wrapper to run train
 2. `distiller.py` -- trainer
 3. `lm_seqs_dataset.py` -- batch generator
-4. `custom_step.py` -- functions for KLDiv step
+4. `custom_step.py` -- functions one train/valid step with different losses
 5. `my_index.py` -- backward optimization
 6. `grouped_batch_sampler.py` -- group batches by length, to reduce padding
 7. `utils.py` -- auxilary utils for training

@@ -47,6 +47,9 @@ def check_sequences(file, teacher_special_tokens, student_special_tokens, min_le
         shard = pickle.load(f)
         bar = progressbar.ProgressBar(max_value=len(shard))
         for i, seq in enumerate(shard):
+            if all(1 if s in teacher_special_tokens.values() else 0 for s in set(seq[0])) or all(1 if s in student_special_tokens.values() else 0 for s in set(seq[1])):
+                ct['special_removed'] += 1
+                continue
             if any(len(s) < min_len for s in seq):
                 ct['empty_removed'] += 1
             elif count_unk_seq(seq[0], teacher_special_tokens['cls_token']) or count_unk_seq(seq[1], student_special_tokens['cls_token']):

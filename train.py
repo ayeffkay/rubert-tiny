@@ -127,7 +127,15 @@ def main():
     parser.add_argument(
         "--alpha_cos", default=0.0, type=float, help="Linear weight of the cosine embedding loss. Must be >=0."
     )
-    parser.add_argument("--alpha_contrastive", default=0.0, type=float)
+
+    contrastive = parser.add_argument_group('contrastive_loss')
+    contrastive.add_argument('--alpha_contrastive', default=0.0, type=float)
+    contrastive.add_argument('--use_mismatched_ids', action='store_true')
+    contrastive.add_argument('--from_one_sample', action='store_true')
+    contrastive.add_argument('--n_negative_samples', type=int, default=-1)
+    contrastive.add_argument('--teacher_student_prop', nargs='?', type=float, default=0.5)
+    contrastive.add_argument('--negative_sampling_strategy', choices=['teacher', 'student', 'teacher_and_student', None], default=None)
+    contrastive.add_argument('--add_neg_size_constant', action='store_true')
 
     parser.add_argument("--teacher_token_counts", nargs='?', type=str, help="The token counts in the data_file for MLM.")
     parser.add_argument("--student_token_counts", nargs='?')
@@ -149,6 +157,8 @@ def main():
     parser.add_argument("--warmup_prop", default=0.05, type=float, help="Linear warmup proportion.")
     parser.add_argument("--weight_decay", default=0.0, type=float, help="Weight deay if we apply some.")
     parser.add_argument("--learning_rate", default=5e-4, type=float, help="The initial learning rate for Adam.")
+    parser.add_argument("--valid_epochs_patience", type=int, default=3)
+    parser.add_argument("--reduce_factor", type=float, default=1e-1)
     parser.add_argument("--adam_epsilon", default=1e-6, type=float, help="Epsilon for Adam optimizer.")
     parser.add_argument("--max_grad_norm", default=5.0, type=float, help="Max gradient norm.")
     parser.add_argument("--initializer_range", default=0.02, type=float, help="Random initialization range.")
@@ -165,16 +175,20 @@ def main():
     parser.add_argument('--t2s_mapped_ids', nargs='?')
     parser.add_argument("--sum_probs", action="store_true", help="sum probabilities instead of logits")
 
-    subparsers = parser.add_subparsers(help="Distillation type specific parameters")
-    tokens_mapping_parser = subparsers.add_parser('tokens_mapping')
-    tokens_mapping_parser.add_argument('--t2s_vocab_padded', nargs='?')
-    tokens_mapping_parser.add_argument('--s2t_vocab_padded', nargs='?')
+    kl_reduce_map_group = parser.add_argument_group(title='reduce-map')
+    kl_reduce_map_group.add_argument('--t2s_vocab_padded', nargs='?')
+    kl_reduce_map_group.add_argument('--s2t_vocab_padded', nargs='?')
 
-    matched_tokens_parser = subparsers.add_parser('matched_tokens')
-    matched_tokens_parser.add_argument('--matching_ids', nargs='?')
+    kl_match_group = parser.add_argument_group(title='match')
+    kl_match_group.add_argument('--matching_ids', nargs='?')
 
+    parser.add_argument('--align_hiddens', choices=['match', 'reduce', None], default=None)
 
     args = parser.parse_args()
+
+    # as current implementation can't track mismatches which belong to the specified sample
+    assert not(args.use_mismatched_ids and args.from_one_sample)
+
     init_gpu_params(args)
     set_seed(args)
 
@@ -243,6 +257,11 @@ def main():
     m = int(args.valid_prop * n)
     valid_data = train_data[n - m:]
     train_data = train_data[:n - m]
+    args.train_size = len(train_data)
+    args.valid_size = len(valid_data)
+
+    args.train_cardinality = sum(len(seq) for seq in train_data)
+
     train_lm_seq_dataset = LmSeqsDataset(params=args, all_tokens=train_data)
     valid_lm_seq_dataset = LmSeqsDataset(params=args, all_tokens=valid_data)
     
@@ -291,12 +310,12 @@ def main():
             args.t2s_mapped_ids = torch.tensor(pickle.load(f)).to(f'cuda:{args.local_rank}')
         logger.info("Loaded mapped teacher tokens.")
     
-    if hasattr(args, 't2s_vocab_padded'):
+    if args.t2s_vocab_padded is not None:
         with open(args.t2s_vocab_padded, 'rb') as f:
             args.t2s_vocab_padded = torch.tensor(pickle.load(f)).to(f'cuda:{args.local_rank}')
         logger.info("Loaded padded teacher2student mapping file")
     
-    if hasattr(args,'s2t_vocab_padded') and args.s2t_vocab_padded is not None:
+    if args.s2t_vocab_padded is not None and args.s2t_vocab_padded is not None:
         with open(args.s2t_vocab_padded, 'rb') as f:
             args.s2t_vocab_padded = torch.tensor(pickle.load(f)).to(f'cuda:{args.local_rank}')
         logger.info("Loaded padded student2teacher mapping file")
@@ -305,7 +324,7 @@ def main():
     """
     Matching tokens loading
     """
-    if hasattr(args, 'matching_ids'):
+    if args.matching_ids is not None:
         teacher_matched, student_matched = get_matched_ts_ids(args.matching_ids)
         args.teacher_matched = torch.tensor(teacher_matched).to(f'cuda:{args.local_rank}')
         args.student_matched = torch.tensor(student_matched).to(f'cuda:{args.local_rank}')
