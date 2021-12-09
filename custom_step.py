@@ -87,26 +87,12 @@ def cosine_similarity(student, teacher):
 
 def ce_step(student_logits, teacher_logits, ce_loss_fct, temperature=1):
     b_size = student_logits.size(0)
-    if student_logits.isinf().sum() >= 1.0:
-        # logger.info('-inf in mapped t2s logits, setting KL loss to 0.0 ...')
-        # logger.debug(t2s_ids.cpu().detach().numpy().tolist())
-        # 1. skip step (return)
-        #   number of sync loss.backward() should be equal on all workers
-        #   - pass skip param to self.optimize?
-        #   - what should be the value of loss in skipped step?
-        #   - support correct logging and number of steps counts?
-        #   - allreduce skip step flag from all workers befor sync .backward() ?
-        # 2. find the reason of -inf and subsequent nan ?
-        # 3. use KL with other losses only, set KL to zero -- current workaround
-        # return
-        loss_ce = torch.tensor(0.0, device=student_logits.device)
-    else:
-        loss_ce = (
-            ce_loss_fct(
-                F.log_softmax(student_logits / temperature, dim=-1),
-                F.softmax(teacher_logits / temperature, dim=-1),
-            ) * temperature ** 2
-        ) / b_size
+    loss_ce = (
+        ce_loss_fct(
+            F.log_softmax(student_logits / temperature, dim=-1),
+            F.softmax(teacher_logits / temperature, dim=-1),
+        ) * temperature ** 2
+    ) / b_size
     return loss_ce
 
 
