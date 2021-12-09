@@ -37,7 +37,7 @@ def get_special_tokens_map(tokenizer):
 
 def select_shards(data_folder, gpus, local_rank, n_shards=-1):
     all_shards = list(sorted(glob.glob(data_folder + '/*')))
-    shards_per_worker = len(all_shards) // gpus if n_shards == -1 else 1
+    shards_per_worker = len(all_shards) // gpus if n_shards == -1 else n_shards
     shards_slct = all_shards[local_rank * shards_per_worker:(local_rank + 1) * shards_per_worker]
     return shards_slct
 

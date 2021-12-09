@@ -1,50 +1,74 @@
-import pickle
 import sys
-from collections import defaultdict
-from transformers import DistilBertTokenizer, BertModel
+import pickle
 import numpy as np
+from transformers import DistilBertTokenizer, BertModel
+from collections import defaultdict
 
-# dict without padding
-with open(sys.argv[1], 'rb') as f:
-    t2s = pickle.load(f)
-    
-s2t_map = defaultdict(list)
-student_tokenizer = DistilBertTokenizer.from_pretrained(sys.argv[2])
-teacher_vocab_size = BertModel.from_pretrained(sys.argv[3]).config.vocab_size
 
-for t_idx, st_idxs in t2s.items():
-    for st in st_idxs:
-        s2t_map[st].append(t_idx)
-with open('student2teacher.pickle', 'wb') as f:
-    pickle.dump(s2t_map, f)
+"""
+python preprocessing/student2teacher.py distilrubert_tiny_cased_convers ru_convers teacher2student.pickle teacher_counts.pickle 30 42
+"""
 
-s2t_map_cut = defaultdict(list)
-with open('teacher_counts.pickle', 'rb') as f:
-    teacher_counts = pickle.load(f)
-    
+student_tokenizer_name = sys.argv[1]
+teacher_tokenizer_name = sys.argv[2]
+t2s_mapping_file = sys.argv[3]
+teacher_counts_file = sys.argv[4]
+cut_len = int(sys.argv[5])
+seed = int(sys.argv[6])
+
+np.random.seed(seed)
+
+# dict t_id: [st_ids, ...], without paddind and teacher counts
+with open(t2s_mapping_file, 'rb') as f, open(teacher_counts_file, 'rb') as g:
+    t2s_mapping = pickle.load(f)
+    teacher_counts = pickle.load(g)
+
 teacher_counts = np.array(teacher_counts)
 teacher_probs = teacher_counts / np.sum(teacher_counts)
+teacher_idxs = np.arange(len(teacher_probs))
 
-for st_id, t_idxs in s2t_map.items():
-    if len(t_idxs) <= 30:
-        s2t_map_cut[st_id] = t_idxs
-    
+student_vocab_size = DistilBertTokenizer.from_pretrained(sys.argv[1]).vocab_size
+teacher_vocab_size = BertModel.from_pretrained(sys.argv[2]).config.vocab_size
+
+s2t_vocab = defaultdict(list)
+s2t_idxs = defaultdict(list)
+
+for t_id in t2s_mapping:
+    for j, s_id in enumerate(t2s_mapping[t_id]):
+        s2t_vocab[s_id].append(t_id)
+        s2t_idxs[s_id].append(j)
+
+s2t_vocab_cut = dict.fromkeys(s2t_vocab.keys())
+s2t_idxs_cut = dict.fromkeys(s2t_vocab.keys())
+for s_id in s2t_vocab.keys():
+    if len(s2t_vocab[s_id]) <= cut_len:
+        s2t_vocab_cut[s_id] = s2t_vocab[s_id]
+        s2t_idxs_cut[s_id] = s2t_idxs[s_id]
     else:
-        probs = teacher_probs[t_idxs]
+        probs = teacher_probs[s2t_vocab[s_id]]
         normalized = np.nan_to_num(probs / np.sum(probs), copy=True, nan=1e-20, posinf=None, neginf=None)
         normalized /= np.sum(normalized)
-        sample_size = min(np.sum(normalized != 0), 30)
-        s2t_map_cut[st_id] = np.random.choice(t_idxs, size=sample_size, replace=False, p=normalized).tolist()
-    
+        idxs = np.arange(len(probs))
 
-max_seq_len = max(len(v) for v in s2t_map_cut.values())
-fill_token = teacher_vocab_size
-s2t_padded = fill_token * np.ones((student_tokenizer.vocab_size + 1, max_seq_len), dtype=int)
-for i in range(s2t_padded.shape[0]):
-    if i in s2t_map_cut:
-        s2t_padded[i, :len(s2t_map_cut[i])] = s2t_map_cut[i]
-        s2t_padded[i, len(s2t_map_cut[i]):] = teacher_vocab_size * np.ones(max_seq_len - len(s2t_map_cut[i]))
+        sample_size = min(np.sum(normalized != 0), cut_len)
+        idxs_slct = np.random.choice(idxs, size=sample_size, replace=False, p=normalized).tolist()
+        s2t_vocab_cut[s_id] = np.array(s2t_vocab[s_id])[idxs_slct]
+        s2t_idxs_cut[s_id] = np.array(s2t_idxs[s_id])[idxs_slct]
 
-s2t_padded = s2t_padded.tolist()
+
+max_len = max(len(t_ids) for t_ids in s2t_vocab_cut.values())
+assert max_len == cut_len
+
+pad_token = teacher_vocab_size
+s2t_vocab_cut_padded = teacher_vocab_size * np.ones((student_vocab_size + 1, max_len), dtype=np.int64)
+s2t_idxs_cut_padded = np.zeros_like(s2t_vocab_cut_padded, dtype=np.int64)
+
+for s_id in s2t_vocab_cut.keys():
+    s2t_vocab_cut_padded[s_id, :len(s2t_vocab_cut[s_id])] = s2t_vocab_cut[s_id]
+    s2t_idxs_cut_padded[s_id, :len(s2t_idxs_cut[s_id])] = s2t_idxs_cut[s_id]
+
+
 with open('s2t_padded.pickle', 'wb') as f:
-    pickle.dump(s2t_padded, f)
+    pickle.dump(s2t_vocab_cut_padded.tolist(), f)
+with open('s2t_idxs_padded.pickle', 'wb') as f:
+    pickle.dump(s2t_idxs_cut_padded.tolist(), f)
