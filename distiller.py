@@ -671,14 +671,15 @@ class Distiller:
                 tag="epoch/valid_loss", scalar_value=mean_valid_loss,
                 global_step=self.epoch + 1
             )
-            self.last_valid_loss_ce_epoch /= self.n_valid_iter_epoch
-
+            
             if self.alpha_ce:
+                self.last_valid_loss_ce_epoch /= self.n_valid_iter_epoch
                 self.tensorboard.add_scalar(
                     tag="epoch/valid_ce_loss", scalar_value=self.last_valid_loss_ce_epoch,
                     global_step=self.epoch + 1
                 )
                 self.last_valid_loss_ce_epoch = 0
+                
             if self.alpha_mlm > 0.0:
                 self.last_valid_loss_mlm_epoch /= self.n_valid_iter_epoch
                 self.tensorboard.add_scalar(
@@ -686,6 +687,7 @@ class Distiller:
                     global_step=self.epoch + 1
                 )
                 self.last_valid_loss_mlm_epoch = 0
+                
             if self.alpha_mse > 0.0:
                 self.last_valid_loss_mse_epoch /= self.n_valid_iter_epoch
                 self.tensorboard.add_scalar(
@@ -693,6 +695,7 @@ class Distiller:
                     global_step=self.epoch + 1
                 )
                 self.last_valid_loss_mse_epoch = 0
+                
             if self.alpha_cos > 0.0:
                 self.last_valid_loss_cos_epoch /= self.n_valid_iter_epoch
                 self.tensorboard.add_scalar(
@@ -700,13 +703,15 @@ class Distiller:
                     global_step=self.epoch + 1
                 )
                 self.last_valid_loss_cos_epoch = 0
+                
             if self.alpha_contrastive > 0.0:
                 self.last_valid_loss_contrastive_epoch /= self.n_valid_iter_epoch
                 self.tensorboard.add_scalar(
                     tag="epoch/valid_contrastive_loss", scalar_value=self.last_valid_loss_contrastive_epoch,
                     global_step=self.epoch + 1
                 )
-                self.last_valid_loss_contrastive_epoch /= self.n_valid_iter_epoch
+                self.last_valid_loss_contrastive_epoch = 0
+                
             if mean_valid_loss < self.best_total_valid_loss_epoch:
                 self.best_total_valid_loss_epoch = mean_valid_loss
                 self.save_checkpoint(checkpoint_name="best_valid.pth")
