@@ -178,6 +178,7 @@ def main():
     kl_reduce_map_group = parser.add_argument_group(title='reduce-map')
     kl_reduce_map_group.add_argument('--t2s_vocab_padded', nargs='?')
     kl_reduce_map_group.add_argument('--s2t_vocab_padded', nargs='?')
+    kl_reduce_map_group.add_argument('--s2t_idxs_padded', nargs='?')
 
     kl_match_group = parser.add_argument_group(title='match')
     kl_match_group.add_argument('--matching_ids', nargs='?')
@@ -315,11 +316,15 @@ def main():
             args.t2s_vocab_padded = torch.tensor(pickle.load(f)).to(f'cuda:{args.local_rank}')
         logger.info("Loaded padded teacher2student mapping file")
     
-    if args.s2t_vocab_padded is not None and args.s2t_vocab_padded is not None:
+    if args.s2t_vocab_padded is not None:
         with open(args.s2t_vocab_padded, 'rb') as f:
             args.s2t_vocab_padded = torch.tensor(pickle.load(f)).to(f'cuda:{args.local_rank}')
         logger.info("Loaded padded student2teacher mapping file")
 
+    if args.s2t_idxs_padded is not None:
+        with open(args.s2t_idxs_padded, 'rb') as f:
+            args.s2t_idxs_padded = torch.tensor(pickle.load(f)).to(f'cuda:{args.local_rank}')
+        logger.info("Loaded padded student2teacher idxs mapping file")
     
     """
     Matching tokens loading

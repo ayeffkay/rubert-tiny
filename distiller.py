@@ -374,6 +374,7 @@ class Distiller:
                                                                 student_split_ids, self.params.student_tok_ids['pad_token'], 
                                                                 t2s_vocab_padded=self.params.t2s_vocab_padded, 
                                                                 s2t_vocab_padded=self.params.s2t_vocab_padded,
+                                                                s2t_idxs_padded=self.params.s2t_idxs_padded,
                                                                 sum_probs=self.params.sum_probs)
                 student_mapped_logits = custom_step.masked_select_reshape_2d(student_mapped_logits, t_attn_mask, self.teacher_vocab_size)
                 teacher_mapped_logits = custom_step.masked_select_reshape_2d(t_logits, t_attn_mask, self.teacher_vocab_size)
@@ -385,6 +386,8 @@ class Distiller:
                     loss_ce = custom_step.ce_step(student_mapped_logits, teacher_mapped_logits, self.ce_loss_fct, self.temperature)
         # reduce-map was skipped
         if self.params.matching_ids is not None and self.params.t2s_vocab_padded is None:
+            # use only logits for teacher tokens which could be represented by student tokens
+            # PAD -> PAD, UNK -> UNK, CLS -> CLS, unused1 -> skip, unused2 -> skip, ...
             student_mapped_logits = custom_step.match_step(s_logits, student_mask, 1, self.params.student_matched)
             teacher_mapped_logits = custom_step.match_step(t_logits, teacher_mask, 1, self.params.teacher_matched)
             
