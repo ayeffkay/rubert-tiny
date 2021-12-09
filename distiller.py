@@ -15,11 +15,10 @@ from tqdm import tqdm
 
 from grouped_batch_sampler import GroupedBatchSampler, create_lengths_groups
 from lm_seqs_dataset import LmSeqsDataset
-from transformers import get_constant_schedule_with_warmup, get_cosine_schedule_with_warmup
+from transformers import get_constant_schedule_with_warmup
 from utils import logger
 import sys
 from pathlib import Path
-import time
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -33,8 +32,8 @@ import custom_step
 class Distiller:
     def __init__(
         self, params: dict, 
-        student: nn.Module, teacher: nn.Module, 
-        train_dataset: LmSeqsDataset, valid_dataset: LmSeqsDataset, 
+        student: nn.Module, teacher: nn.Module,
+        train_dataset: LmSeqsDataset, valid_dataset: LmSeqsDataset,
     ):
         logger.info("Initializing Distiller")
         self.params = params
@@ -47,7 +46,7 @@ class Distiller:
         self.student_config = AutoConfig.from_pretrained(params.student_name)
         self.student_vocab_size = student.config.vocab_size
         self.teacher_vocab_size = teacher.config.vocab_size
-        
+
         logger.info("Train size: {}, valid_size: {}".format(len(train_dataset), len(valid_dataset)))
         if params.gpus <= 1:
             train_sampler = RandomSampler(train_dataset)
@@ -57,24 +56,24 @@ class Distiller:
             valid_sampler = DistributedSampler(valid_dataset)
 
         if params.group_by_size:
-            train_groups = create_lengths_groups(lengths=train_dataset.st_len, 
+            train_groups = create_lengths_groups(lengths=train_dataset.st_len,
                                                  k=params.max_model_input_size)
-            train_sampler = GroupedBatchSampler(sampler=train_sampler, 
-                                                group_ids=train_groups, 
+            train_sampler = GroupedBatchSampler(sampler=train_sampler,
+                                                group_ids=train_groups,
                                                 batch_size=params.batch_size)
-            valid_groups = create_lengths_groups(lengths=valid_dataset.st_len, 
+            valid_groups = create_lengths_groups(lengths=valid_dataset.st_len,
                                                  k=params.max_model_input_size)
-            valid_sampler = GroupedBatchSampler(sampler=valid_sampler, 
-                                                group_ids=valid_groups, 
+            valid_sampler = GroupedBatchSampler(sampler=valid_sampler,
+                                                group_ids=valid_groups,
                                                 batch_size=params.batch_size)
         else:
             train_sampler = BatchSampler(sampler=train_sampler, batch_size=params.batch_size, drop_last=False)
             valid_sampler = BatchSampler(sampler=valid_sampler, batch_size=params.batch_size, drop_last=False)
 
-        self.train_dataloader = DataLoader(dataset=train_dataset, 
-                                           batch_sampler=train_sampler, 
+        self.train_dataloader = DataLoader(dataset=train_dataset,
+                                           batch_sampler=train_sampler,
                                            collate_fn=train_dataset.batch_sequences)
-        self.valid_dataloader = DataLoader(dataset=valid_dataset, 
+        self.valid_dataloader = DataLoader(dataset=valid_dataset,
                                            batch_sampler=valid_sampler,
                                            collate_fn=valid_dataset.batch_sequences)
         self.temperature = params.temperature
@@ -144,7 +143,6 @@ class Distiller:
                 self.hid_projector_contrastive = nn.ModuleList([nn.Linear(student.config.hidden_size, teacher.config.hidden_size).to(f'cuda:{params.local_rank}') for _ in range(4)])
             elif self.params.projection_strategy == 'average_by_layers':
                 self.hid_projector_contrastive = nn.ModuleList([nn.Linear(student.config.hidden_size, teacher.config.hidden_size).to(f'cuda:{params.local_rank}')])
-            
 
         logger.info("--- Initializing model optimizer")
         assert params.gradient_accumulation_steps >= 1
@@ -163,7 +161,7 @@ class Distiller:
                 ],
                 "weight_decay": 0.0,
             }
-            
+
         ]
         logger.info(
             "------ Number of trainable parameters (student): %i"
@@ -185,7 +183,7 @@ class Distiller:
                                                                             factor=params.reduce_factor, patience=params.valid_epochs_patience, 
                                                                             threshold=1e-2, cooldown=params.valid_epochs_patience, 
                                                                             eps=1e-10, min_lr=1e-6, verbose=True)
-        
+
         """
         self.scheduler = get_cosine_schedule_with_warmup(
             self.optimizer, num_warmup_steps=self.warmup_steps, num_training_steps=num_train_optimization_steps
@@ -212,11 +210,9 @@ class Distiller:
             self.tensorboard.add_text(tag="config/training", text_string=str(self.params), global_step=0)
             self.tensorboard.add_text(tag="config/student", text_string=str(self.student_config), global_step=0)
 
-    
     def generate_padding_mask(self, seq_len, lengths):
         padding_mask = torch.arange(seq_len, dtype=torch.long, device=lengths.device) < lengths[:,None]
         return padding_mask
-
 
     def prepare_batch_mlm(self, tok_ids, lengths, pad_token_id, mask_token_id, token_probs):
         """
@@ -268,23 +264,22 @@ class Distiller:
         batch_cuda = {arg_name: arg_value.to(f"cuda:{self.params.local_rank}") for arg_name, arg_value in batch.items()}
         batch_cuda['t_attn_mask'] = self.generate_padding_mask(batch_cuda['t_ids'].size(1), batch_cuda['t_lengths'])
 
-
         if self.alpha_mlm > 0.0 and self.student_token_probs is not None:
-            s_tok_ids, s_attn_mask, s_lm_labels = self.prepare_batch_mlm(batch_cuda['s_ids'], 
-                                                                            batch_cuda['s_lengths'], 
-                                                                            self.params.student_tok_ids['pad_token'], 
-                                                                            self.params.student_tok_ids['mask_token'], 
-                                                                            self.student_token_probs
-                                                                        )
+            s_tok_ids, s_attn_mask, s_lm_labels = self.prepare_batch_mlm(batch_cuda['s_ids'],
+                                                                         batch_cuda['s_lengths'],
+                                                                         self.params.student_tok_ids['pad_token'],
+                                                                         self.params.student_tok_ids['mask_token'],
+                                                                         self.student_token_probs
+                                                                         )
             batch_cuda['s_ids'] = s_tok_ids
-            batch_cuda['s_lm_labels'] = s_lm_labels                                                            
+            batch_cuda['s_lm_labels'] = s_lm_labels
         else:
             s_attn_mask = self.generate_padding_mask(batch_cuda['s_ids'].size(1), batch_cuda['s_lengths'])
         batch_cuda['s_attn_mask'] = s_attn_mask
 
         if self.params.t2s_mapping is not None:
-            batch_cuda['t2s_attn_mask'] = self.generate_padding_mask(batch_cuda['t2s_ids'].size(1), 
-                                                                    batch_cuda['t2s_lengths'])
+            batch_cuda['t2s_attn_mask'] = self.generate_padding_mask(batch_cuda['t2s_ids'].size(1),
+                                                                     batch_cuda['t2s_lengths'])
         return batch_cuda
 
     def train(self):
@@ -308,17 +303,17 @@ class Distiller:
                 batch_cuda = self.prepare_batch(batch)
                 batch_cuda['grad_on'] = True
                 self.step(**batch_cuda)
-                
+
                 iter_bar.update()
                 iter_bar.set_postfix(
                     {"Last_loss": f"{self.last_train_loss:.5f}", "Avg_cum_loss": f"{self.total_train_loss_epoch/self.n_train_iter_epoch:.2f}"}
                 )
-                
+
             iter_bar.close()
 
             if self.is_master:
                 logger.info(f"--- Ending epoch {self.epoch}/{self.params.n_epoch-1}")
-            
+
             self.validate()
             self.end_epoch()
 
@@ -326,7 +321,7 @@ class Distiller:
             logger.info("Save very last checkpoint as `pytorch_model.bin`.")
             self.save_checkpoint(checkpoint_name="pytorch_model.bin")
             logger.info("Training is finished")
-            
+
     def validate(self):
         self.student.eval()
         if self.is_master:
@@ -343,22 +338,22 @@ class Distiller:
                 {"Avg_cum_valid_loss": f"{self.total_valid_loss_epoch/self.n_valid_iter_epoch:.2f}"}
             )
         iter_bar.close()
-        
+
         if self.n_gradient_updates_total > self.warmup_steps:
-                self.reduce_on_plateau.step(self.total_valid_loss_epoch/self.n_valid_iter_epoch)
-        
+            self.reduce_on_plateau.step(self.total_valid_loss_epoch/self.n_valid_iter_epoch)
+
         if self.is_master:
             logger.info(f"--- Ending validation epoch {self.epoch}/{self.params.n_epoch-1}")
-        
-    def step(self, t_ids=None, t_attn_mask = None, 
-            s_ids=None, s_attn_mask=None, s_lm_labels=None,
-            t2s_ids=None, t2s_attn_mask=None,  
-            student_split_ids=None, teacher_mask=None, student_mask=None,
-            grad_on=True, **kwargs):
+
+    def step(self, t_ids=None, t_attn_mask=None,
+             s_ids=None, s_attn_mask=None, s_lm_labels=None,
+             t2s_ids=None, t2s_attn_mask=None,
+             student_split_ids=None, teacher_mask=None, student_mask=None,
+             grad_on=True, **kwargs):
         with torch.no_grad():
             t_out = self.teacher(input_ids=t_ids, attention_mask=t_attn_mask)
             t_logits = t_out.logits
-        
+
         with torch.set_grad_enabled(grad_on):
             s_out = self.student(input_ids=s_ids, attention_mask=s_attn_mask)
             s_logits = s_out.logits
@@ -366,15 +361,16 @@ class Distiller:
         loss = 0.0
         if self.params.t2s_mapping is not None:
             with torch.set_grad_enabled(grad_on):
-                t2s_out = self.student(input_ids=t2s_ids, 
-                                        attention_mask=t2s_attn_mask)
+                t2s_out = self.student(input_ids=t2s_ids,
+                                       attention_mask=t2s_attn_mask)
             t2s_logits = t2s_out.logits
             if self.params.t2s_vocab_padded is not None:
-                student_mapped_logits = custom_step.map_step(t2s_logits, 
-                                                                student_split_ids, self.params.student_tok_ids['pad_token'], 
-                                                                t2s_vocab_padded=self.params.t2s_vocab_padded, 
-                                                                s2t_vocab_padded=self.params.s2t_vocab_padded,
-                                                                sum_probs=self.params.sum_probs)
+                student_mapped_logits = custom_step.map_step(t2s_logits,
+                                                             student_split_ids, self.params.student_tok_ids['pad_token'],
+                                                             t2s_vocab_padded=self.params.t2s_vocab_padded,
+                                                             s2t_vocab_padded=self.params.s2t_vocab_padded,
+                                                             s2t_idxs_padded=self.params.s2t_idxs_padded,
+                                                             sum_probs=self.params.sum_probs)
                 student_mapped_logits = custom_step.masked_select_reshape_2d(student_mapped_logits, t_attn_mask, self.teacher_vocab_size)
                 teacher_mapped_logits = custom_step.masked_select_reshape_2d(t_logits, t_attn_mask, self.teacher_vocab_size)
                 if self.params.t2s_mapped_ids is not None:
@@ -385,64 +381,65 @@ class Distiller:
                     loss_ce = custom_step.ce_step(student_mapped_logits, teacher_mapped_logits, self.ce_loss_fct, self.temperature)
         # reduce-map was skipped
         if self.params.matching_ids is not None and self.params.t2s_vocab_padded is None:
+            # use only logits for teacher tokens which could be represented by student tokens
+            # PAD -> PAD, UNK -> UNK, CLS -> CLS, unused1 -> skip, unused2 -> skip, ...
             student_mapped_logits = custom_step.match_step(s_logits, student_mask, 1, self.params.student_matched)
             teacher_mapped_logits = custom_step.match_step(t_logits, teacher_mask, 1, self.params.teacher_matched)
-            
+
             if self.alpha_ce > 0.0:
                 loss_ce = custom_step.ce_step(student_mapped_logits, teacher_mapped_logits, self.ce_loss_fct, self.temperature)
 
-          
         # match strategy, use s outputs
         if self.params.align_hiddens == 'match' and self.params.matching_ids is not None:
             if self.alpha_mse > 0.0:
                 loss_mse = custom_step.mse_step(self.hid_projector_mse, self.mse_loss_fct, 
-                                                s_out.hidden_states, t_out.hidden_states, 
+                                                s_out.hidden_states, t_out.hidden_states,
                                                 student_mask, teacher_mask, 
                                                 1, self.params.projection_strategy)
             if self.alpha_contrastive > 0.0:
-                loss_contrastive = custom_step.contrastive_step(self.params.train_cardinality, self.hid_projector_contrastive, 
-                                                                s_out.hidden_states, t_out.hidden_states, 
-                                                                student_mask, teacher_mask, 0, 1, self.params.projection_strategy, 
-                                                                negative_sampling_strategy=self.params.negative_sampling_strategy, 
-                                                                use_mismatched_ids=self.params.use_mismatched_ids, 
-                                                                n_negative_samples=self.params.n_negative_samples, 
-                                                                teacher_student_prop=self.params.teacher_student_prop, 
-                                                                temperature=self.temperature, 
+                loss_contrastive = custom_step.contrastive_step(self.params.train_cardinality, self.hid_projector_contrastive,
+                                                                s_out.hidden_states, t_out.hidden_states,
+                                                                student_mask, teacher_mask, 0, 1, self.params.projection_strategy,
+                                                                negative_sampling_strategy=self.params.negative_sampling_strategy,
+                                                                use_mismatched_ids=self.params.use_mismatched_ids,
+                                                                n_negative_samples=self.params.n_negative_samples,
+                                                                teacher_student_prop=self.params.teacher_student_prop,
+                                                                temperature=self.temperature,
                                                                 from_one_sample=self.params.from_one_sample,
                                                                 add_neg_size_constant=self.params.add_neg_size_constant,
-                                                                )    
+                                                                )
         # reduce strategy, use t2s hiddens and t2s mapping
         elif self.params.align_hiddens == 'reduce' and self.params.t2s_mapping is not None:
             if self.alpha_mse > 0.0:
-                loss_mse = custom_step.mse_step(self.hid_projector_mse, self.mse_loss_fct, 
-                                                t2s_out.hidden_states, t_out.hidden_states, 
-                                                t_attn_mask, t_attn_mask, 1, 
-                                                self.params.projection_strategy, 
+                loss_mse = custom_step.mse_step(self.hid_projector_mse, self.mse_loss_fct,
+                                                t2s_out.hidden_states, t_out.hidden_states,
+                                                t_attn_mask, t_attn_mask, 1,
+                                                self.params.projection_strategy,
                                                 student_split_ids, self.params.student_tok_ids['pad_token'])
             if self.alpha_contrastive > 0.0:
-                loss_contrastive = custom_step.contrastive_step(self.params.train_cardinality, 
-                                                                self.hid_projector_contrastive, 
-                                                                t2s_out.hidden_states, t_out.hidden_states, 
-                                                                t_attn_mask, t_attn_mask, 0, 1, 
-                                                                self.params.projection_strategy, 
-                                                                student_split_ids, 
-                                                                self.params.student_tok_ids['pad_token'], 
-                                                                self.params.negative_sampling_strategy, 
-                                                                self.params.use_mismatched_ids, 
-                                                                self.params.n_negative_samples, 
-                                                                self.params.teacher_student_prop, 
-                                                                self.temperature, self.params.from_one_sample, 
+                loss_contrastive = custom_step.contrastive_step(self.params.train_cardinality,
+                                                                self.hid_projector_contrastive,
+                                                                t2s_out.hidden_states, t_out.hidden_states,
+                                                                t_attn_mask, t_attn_mask, 0, 1,
+                                                                self.params.projection_strategy,
+                                                                student_split_ids,
+                                                                self.params.student_tok_ids['pad_token'],
+                                                                self.params.negative_sampling_strategy,
+                                                                self.params.use_mismatched_ids,
+                                                                self.params.n_negative_samples,
+                                                                self.params.teacher_student_prop,
+                                                                self.temperature, self.params.from_one_sample,
                                                                 self.params.add_neg_size_constant)
         # no alignment strategy for hiddens specified
         elif self.params.align_hiddens is None and self.params.matching_ids is not None:
             if self.alpha_contrastive > 0.0:
-                loss_contrastive = custom_step.contrastive_step_v0(self.params.train_cardinality, 
-                                                                self.hid_projector_contrastive, 
-                                                                s_out.hidden_states, t_out.hidden_states, 
-                                                                student_mask, teacher_mask, 0, 1, 
-                                                                self.params.projection_strategy, 
-                                                                self.params.student_tok_ids['pad_token'], 
-                                                                self.params.add_neg_size_constant)
+                loss_contrastive = custom_step.contrastive_step_v0(self.params.train_cardinality,
+                                                                   self.hid_projector_contrastive,
+                                                                   s_out.hidden_states, t_out.hidden_states,
+                                                                   student_mask, teacher_mask, 0, 1,
+                                                                   self.params.projection_strategy,
+                                                                   self.params.student_tok_ids['pad_token'],
+                                                                   self.params.add_neg_size_constant)
 
         loss = 0.
         with torch.set_grad_enabled(grad_on):
@@ -470,21 +467,21 @@ class Distiller:
                 loss += self.alpha_contrastive * loss_contrastive
 
         if grad_on:
-                self.total_train_loss_epoch += loss.item()
-                self.last_train_loss = loss.item()
-                if self.alpha_ce > 0.0:
-                    self.last_loss_ce = loss_ce.item()
-                if self.alpha_mlm > 0.0:
-                    self.last_loss_mlm = loss_mlm.item()
-                if self.alpha_mse > 0.0:
-                    self.last_loss_mse = loss_mse.item()
-                if self.alpha_cos > 0.0:
-                    self.last_loss_cos = loss_cos.item()
-                if self.alpha_contrastive > 0.0:
-                    self.last_loss_contrastive = loss_contrastive.item()
-                self.n_sequences_epoch += t_ids.size(0) * self.params.gpus
-                self.n_sequences_total += t_ids.size(0) * self.params.gpus
-                self.optimize(loss)
+            self.total_train_loss_epoch += loss.item()
+            self.last_train_loss = loss.item()
+            if self.alpha_ce > 0.0:
+                self.last_loss_ce = loss_ce.item()
+            if self.alpha_mlm > 0.0:
+                self.last_loss_mlm = loss_mlm.item()
+            if self.alpha_mse > 0.0:
+                self.last_loss_mse = loss_mse.item()
+            if self.alpha_cos > 0.0:
+                self.last_loss_cos = loss_cos.item()  # todo: where is loss_cos defenition?
+            if self.alpha_contrastive > 0.0:
+                self.last_loss_contrastive = loss_contrastive.item()
+            self.n_sequences_epoch += t_ids.size(0) * self.params.gpus
+            self.n_sequences_total += t_ids.size(0) * self.params.gpus
+            self.optimize(loss)
         else:
             self.total_valid_loss_epoch += loss.item()
             if self.alpha_ce > 0.0:
@@ -497,9 +494,8 @@ class Distiller:
                 self.last_valid_loss_cos_epoch += loss_cos.item()
             if self.alpha_contrastive > 0.0:
                 self.last_valid_loss_contrastive_epoch += loss_contrastive.item()
-                
-            self.n_valid_iter_epoch += 1
 
+            self.n_valid_iter_epoch += 1
 
     def optimize(self, loss):
         """
@@ -528,18 +524,17 @@ class Distiller:
 
             self.n_gradient_updates_epoch += 1
             self.n_gradient_updates_total += 1
-            
+
             if self.n_gradient_updates_total < self.warmup_steps:
                 self.const_scheduler_with_warmup.step()
-            
-            #self.scheduler.step()
+
+            # self.scheduler.step()
 
             if self.n_gradient_updates_epoch % self.params.log_interval == 0:
                 self.log_tensorboard()
                 self.last_log = time.time()
             if self.n_gradient_updates_epoch % self.params.checkpoint_interval == 0:
                 self.save_checkpoint()
-            
 
     def log_tensorboard(self):
         """
@@ -574,17 +569,17 @@ class Distiller:
             scalar_value=self.total_train_loss_epoch / self.n_train_iter_epoch,
             global_step=self.n_sequences_total
         )
-        self.tensorboard.add_scalar(tag="train_losses/train_loss", 
-            scalar_value=self.last_train_loss, 
-            global_step=self.n_gradient_updates_total
-        )
-        self.tensorboard.add_scalar(tag="train_losses/train_loss_samples", 
-            scalar_value=self.last_train_loss, 
-            global_step=self.n_sequences_total
-        )
+        self.tensorboard.add_scalar(tag="train_losses/train_loss",
+                                    scalar_value=self.last_train_loss,
+                                    global_step=self.n_gradient_updates_total
+                                    )
+        self.tensorboard.add_scalar(tag="train_losses/train_loss_samples",
+                                    scalar_value=self.last_train_loss,
+                                    global_step=self.n_sequences_total
+                                    )
         self.tensorboard.add_scalar(
-            tag="learning_rate_steps/lr", 
-            scalar_value=self.optimizer.param_groups[0]['lr'], 
+            tag="learning_rate_steps/lr",
+            scalar_value=self.optimizer.param_groups[0]['lr'],
             global_step=self.n_gradient_updates_total
         )
 
@@ -599,58 +594,58 @@ class Distiller:
 
         if self.alpha_ce > 0.0:
             self.tensorboard.add_scalar(
-                tag="train_losses/train_loss_ce", 
-                scalar_value=self.last_loss_ce, 
+                tag="train_losses/train_loss_ce",
+                scalar_value=self.last_loss_ce,
                 global_step=self.n_gradient_updates_total
             )
             self.tensorboard.add_scalar(
-                tag="train_losses/train_loss_ce_samples", 
-                scalar_value=self.last_loss_ce, 
+                tag="train_losses/train_loss_ce_samples",
+                scalar_value=self.last_loss_ce,
                 global_step=self.n_sequences_total
             )
-            
+
         if self.alpha_mlm > 0.0:
             self.tensorboard.add_scalar(
-                tag="train_losses/train_loss_mlm", 
-                scalar_value=self.last_loss_mlm, 
+                tag="train_losses/train_loss_mlm",
+                scalar_value=self.last_loss_mlm,
                 global_step=self.n_gradient_updates_total
             )
             self.tensorboard.add_scalar(
-                tag="train_losses/train_loss_mlm_samples", 
-                scalar_value=self.last_loss_mlm, 
+                tag="train_losses/train_loss_mlm_samples",
+                scalar_value=self.last_loss_mlm,
                 global_step=self.n_sequences_total
             )
         if self.alpha_mse > 0.0:
             self.tensorboard.add_scalar(
-                tag="train_losses/train_loss_mse", 
-                scalar_value=self.last_loss_mse, 
+                tag="train_losses/train_loss_mse",
+                scalar_value=self.last_loss_mse,
                 global_step=self.n_gradient_updates_total
             )
             self.tensorboard.add_scalar(
-                tag="train_losses/train_loss_mse_samples", 
-                scalar_value=self.last_loss_mse, 
+                tag="train_losses/train_loss_mse_samples",
+                scalar_value=self.last_loss_mse,
                 global_step=self.n_sequences_total
             )
         if self.alpha_cos > 0.0:
             self.tensorboard.add_scalar(
-                tag="train_losses/train_loss_cos", 
-                scalar_value=self.last_loss_cos, 
+                tag="train_losses/train_loss_cos",
+                scalar_value=self.last_loss_cos,
                 global_step=self.n_gradient_updates_total
             )
             self.tensorboard.add_scalar(
-                tag="train_losses/train_loss_cos_samples", 
-                scalar_value=self.last_loss_cos, 
+                tag="train_losses/train_loss_cos_samples",
+                scalar_value=self.last_loss_cos,
                 global_step=self.n_sequences_total
             )
         if self.alpha_contrastive > 0.0:
             self.tensorboard.add_scalar(
-                tag="train_losses/train_loss_contrastive", 
-                scalar_value=self.last_loss_contrastive, 
+                tag="train_losses/train_loss_contrastive",
+                scalar_value=self.last_loss_contrastive,
                 global_step=self.n_gradient_updates_total
             )
             self.tensorboard.add_scalar(
-                tag="train_losses/train_loss_contrastive_samples", 
-                scalar_value=self.last_loss_contrastive, 
+                tag="train_losses/train_loss_contrastive_samples",
+                scalar_value=self.last_loss_contrastive,
                 global_step=self.n_sequences_total
             )
 
@@ -664,8 +659,8 @@ class Distiller:
         if self.is_master:
             self.save_checkpoint(checkpoint_name=f"model_epoch_{self.epoch}.pth")
             self.tensorboard.add_scalar(
-                tag="epoch/learning_rate", 
-                scalar_value=self.optimizer.param_groups[0]['lr'], 
+                tag="epoch/learning_rate",
+                scalar_value=self.optimizer.param_groups[0]['lr'],
                 global_step=self.epoch + 1
             )
             self.tensorboard.add_scalar(
@@ -673,48 +668,48 @@ class Distiller:
             )
             mean_valid_loss = self.total_valid_loss_epoch / self.n_valid_iter_epoch
             self.tensorboard.add_scalar(
-                tag="epoch/valid_loss", scalar_value=mean_valid_loss, 
+                tag="epoch/valid_loss", scalar_value=mean_valid_loss,
                 global_step=self.epoch + 1
             )
             self.last_valid_loss_ce_epoch /= self.n_valid_iter_epoch
 
             if self.alpha_ce:
                 self.tensorboard.add_scalar(
-                    tag="epoch/valid_ce_loss", scalar_value=self.last_valid_loss_ce_epoch, 
+                    tag="epoch/valid_ce_loss", scalar_value=self.last_valid_loss_ce_epoch,
                     global_step=self.epoch + 1
                 )
                 self.last_valid_loss_ce_epoch = 0
             if self.alpha_mlm > 0.0:
                 self.last_valid_loss_mlm_epoch /= self.n_valid_iter_epoch
                 self.tensorboard.add_scalar(
-                    tag="epoch/valid_mlm_loss", scalar_value=self.last_valid_loss_mlm_epoch, 
+                    tag="epoch/valid_mlm_loss", scalar_value=self.last_valid_loss_mlm_epoch,
                     global_step=self.epoch + 1
                 )
                 self.last_valid_loss_mlm_epoch = 0
             if self.alpha_mse > 0.0:
                 self.last_valid_loss_mse_epoch /= self.n_valid_iter_epoch
                 self.tensorboard.add_scalar(
-                    tag="epoch/valid_mse_loss", scalar_value=self.last_valid_loss_mse_epoch, 
+                    tag="epoch/valid_mse_loss", scalar_value=self.last_valid_loss_mse_epoch,
                     global_step=self.epoch + 1
                 )
                 self.last_valid_loss_mse_epoch = 0
             if self.alpha_cos > 0.0:
                 self.last_valid_loss_cos_epoch /= self.n_valid_iter_epoch
                 self.tensorboard.add_scalar(
-                    tag="epoch/valid_cos_loss", scalar_value=self.last_valid_loss_cos_epoch, 
+                    tag="epoch/valid_cos_loss", scalar_value=self.last_valid_loss_cos_epoch,
                     global_step=self.epoch + 1
                 )
                 self.last_valid_loss_cos_epoch = 0
             if self.alpha_contrastive > 0.0:
                 self.last_valid_loss_contrastive_epoch /= self.n_valid_iter_epoch
                 self.tensorboard.add_scalar(
-                    tag="epoch/valid_contrastive_loss", scalar_value=self.last_valid_loss_contrastive_epoch, 
+                    tag="epoch/valid_contrastive_loss", scalar_value=self.last_valid_loss_contrastive_epoch,
                     global_step=self.epoch + 1
                 )
                 self.last_valid_loss_contrastive_epoch /= self.n_valid_iter_epoch
             if mean_valid_loss < self.best_total_valid_loss_epoch:
                 self.best_total_valid_loss_epoch = mean_valid_loss
-                self.save_checkpoint(checkpoint_name=f"best_valid.pth")
+                self.save_checkpoint(checkpoint_name="best_valid.pth")
                 self.save_checkpoint(checkpoint_name="best_model.bin")
                 logger.info("Best validation loss was improved to {:.4f}".format(mean_valid_loss))
             else:

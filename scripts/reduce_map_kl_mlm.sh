@@ -34,4 +34,5 @@ python -m torch.distributed.launch \
     --t2s_mapped_ids t2s_mapped_ids.pickle \
     --sum_probs \
     --t2s_vocab_padded t2s_padded.pickle \
-    --s2t_vocab_padded s2t_padded.pickle
+    --s2t_vocab_padded s2t_padded.pickle \
+    --s2t_idxs_padded s2t_idxs_padded.pickle
