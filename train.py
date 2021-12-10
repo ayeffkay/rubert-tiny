@@ -262,7 +262,7 @@ def main():
     args.valid_size = len(valid_data)
 
     negative_samples_col = 0 if args.negative_sampling_strategy in 'teacher' else 1
-    args.train_cardinality = sum(len(seq) for seq in train_data[negative_samples_col])
+    args.train_cardinality = sum(len(row[negative_samples_col]) for row in train_data)
 
     train_lm_seq_dataset = LmSeqsDataset(params=args, all_tokens=train_data)
     valid_lm_seq_dataset = LmSeqsDataset(params=args, all_tokens=valid_data)
