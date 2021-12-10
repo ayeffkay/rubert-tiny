@@ -38,7 +38,7 @@ def get_special_tokens_map(tokenizer):
 
 def select_shards(data_folder, gpus, local_rank, n_shards=-1):
     all_shards = list(sorted(glob.glob(data_folder + '/*')))
-    shards_per_worker = len(all_shards) // gpus if n_shards == -1 else n_shards
+    shards_per_worker = len(all_shards) // gpus if n_shards <= 0 else n_shards
     shards_slct = all_shards[local_rank * shards_per_worker:(local_rank + 1) * shards_per_worker]
     return shards_slct
 
@@ -116,13 +116,15 @@ def main():
     parser.add_argument("--word_rand", default=0.1, type=float, help="Proportion of tokens to randomly replace.")
 
     parser.add_argument("--alpha_mse", default=0.0, type=float, help="Linear weight of the MSE loss. Must be >=0.")
-    parser.add_argument('--projection_strategy', choices=['last', 'skip', 'average', 'average_by_layers', None], default=None,
+    parser.add_argument('--projection_strategy', choices=['last', 'skip', 'average', 'average_by_layers', 'select_by_ids', None], default=None,
                         help="""How to use student and teacher hidden representations for MSE loss.
                         last -- use last states of teacher and student (1-1 mapping), 
                         skip -- use intermediate states from teacher and student (1-1 mapping), 
                         average -- average teacher layers output sequentially to fit number of student hidden layers (1-n mapping)
                         average_by_layers -- average student and teacher hidden representations by layers (m-n mapping to 1-1 mapping)
+                        select_by_ids -- select teacher and student layers ids using argument `t_s_layers_ids`
                         """)
+    parser.add_argument('--t_s_layers_ids', type=json.loads, nargs='?')
 
     parser.add_argument(
         "--alpha_cos", default=0.0, type=float, help="Linear weight of the cosine embedding loss. Must be >=0."
@@ -261,8 +263,12 @@ def main():
     args.train_size = len(train_data)
     args.valid_size = len(valid_data)
 
-    negative_samples_col = 0 if args.negative_sampling_strategy in 'teacher' else 1
-    args.train_cardinality = sum(len(row[negative_samples_col]) for row in train_data)
+    if args.align_hiddens == 'match':
+        negative_samples_col = 2 if args.negative_sampling_strategy == 'teacher' else 3
+        args.train_cardinality = sum(np.count_nonzero(row[negative_samples_col]) for row in train_data)
+    else:
+        negative_samples_col = 0 if args.negative_sampling_strategy in 'teacher' else 1
+        args.train_cardinality = sum(len(row[negative_samples_col]) for row in train_data)
 
     train_lm_seq_dataset = LmSeqsDataset(params=args, all_tokens=train_data)
     valid_lm_seq_dataset = LmSeqsDataset(params=args, all_tokens=valid_data)

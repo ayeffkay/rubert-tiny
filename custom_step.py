@@ -114,7 +114,7 @@ def contrastive_step(train_cardinality, hid_projectors_contrastive, s_hid, t_hid
                      s_pad_token=0,
                      negative_sampling_strategy='student', use_mismatched_ids=False,
                      n_negative_samples=-1, teacher_student_prop=0.5, temperature=1,
-                     from_one_sample=False, add_neg_size_constant=False,
+                     from_one_sample=False, add_neg_size_constant=False, t_s_layers_ids=None
                      ):
     """"
         from_one_sample -- make sampling from current sample only, not from all batch
@@ -130,9 +130,11 @@ def contrastive_step(train_cardinality, hid_projectors_contrastive, s_hid, t_hid
         mismatches = get_t_s_hiddens(s_hid, t_hid,
                                      s_mask, t_mask,
                                      false_label, proj_strategy,
-                                     student_split_ids, s_pad_token)
+                                     student_split_ids, s_pad_token, 
+                                     t_s_layers_ids=t_s_layers_ids)
     for i, (s, t) in enumerate(get_t_s_hiddens(s_hid, t_hid, s_mask, t_mask, true_label,
-                                               proj_strategy, student_split_ids, s_pad_token)):
+                                               proj_strategy, student_split_ids, s_pad_token, 
+                                               t_s_layers_ids=t_s_layers_ids)):
         stud_hid_proj = hid_projectors_contrastive[i](s)
         # loop by b*seq_len, here t.size(0) = s.size(0) as get_t_s_hiddens returns aligned sequences
         b_seq_len = t.size(0)
@@ -227,7 +229,7 @@ def contrastive_step_v0(train_cardinality, hid_projectors_contrastive,
 
 
 def get_t_s_hiddens(s_hid, t_hid, student_mask, teacher_mask, true_label=1, proj_strategy=None, student_split_ids=None,
-                    s_pad_token=0):
+                    s_pad_token=0, t_s_layers_ids=None):
     s_hid_dim = s_hid[-1].size(-1)
     t_hid_dim = t_hid[-1].size(-1)
 
@@ -255,6 +257,14 @@ def get_t_s_hiddens(s_hid, t_hid, student_mask, teacher_mask, true_label=1, proj
         t_avg = average_by_layers(t_hid, attn_mask=teacher_mask == true_label)
         for _ in range(1):
             yield s_avg, t_avg
+    elif proj_strategy == 'select_by_ids' and t_s_layers_ids is not None:
+        s_id = t_s_layers_ids['student']
+        t_id = t_s_layers_ids['teacher']
+        s_i = reduce_seq(s_hid[s_id], student_split_ids, s_pad_token) if student_split_ids is not None else s_hid[s_id]
+        s_i = masked_select_reshape_2d(s_i, student_mask == true_label, s_hid_dim)
+        t_i = masked_select_reshape_2d(t_hid[t_id], teacher_mask == true_label, t_hid_dim)
+        for _ in range(1):
+            yield s_i, t_i
 
 
 def negative_sampling(s=None, t=None, positive_idx=0, k=-1, weights=None, prop=0.5, sampling_strategy='teacher'):
