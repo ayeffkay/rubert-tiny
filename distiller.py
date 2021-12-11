@@ -129,7 +129,7 @@ class Distiller:
             self.mse_loss_fct = nn.MSELoss(reduction="sum")
             if self.params.projection_strategy in ['last', 'skip', 'average']:
                 self.hid_projector_mse = nn.ModuleList([nn.Linear(student.config.hidden_size, teacher.config.hidden_size).to(f'cuda:{params.local_rank}') for _ in range(4)])
-            elif self.params.projection_strategy == 'average_by_layers':
+            elif self.params.projection_strategy in ['average_by_layers', 'select_by_ids']:
                 self.hid_projector_mse = nn.ModuleList([nn.Linear(student.config.hidden_size, teacher.config.hidden_size).to(f'cuda:{params.local_rank}')])
         if self.alpha_cos > 0.0:
             self.last_loss_cos = 0
@@ -141,7 +141,7 @@ class Distiller:
             self.last_valid_loss_contrastive_epoch = 0
             if self.params.projection_strategy in ['last', 'skip', 'average']:
                 self.hid_projector_contrastive = nn.ModuleList([nn.Linear(student.config.hidden_size, teacher.config.hidden_size).to(f'cuda:{params.local_rank}') for _ in range(4)])
-            elif self.params.projection_strategy == 'average_by_layers':
+            elif self.params.projection_strategy in ['average_by_layers', 'select_by_ids']:
                 self.hid_projector_contrastive = nn.ModuleList([nn.Linear(student.config.hidden_size, teacher.config.hidden_size).to(f'cuda:{params.local_rank}')])
 
         logger.info("--- Initializing model optimizer")
@@ -395,7 +395,8 @@ class Distiller:
                 loss_mse = custom_step.mse_step(self.hid_projector_mse, self.mse_loss_fct, 
                                                 s_out.hidden_states, t_out.hidden_states,
                                                 student_mask, teacher_mask, 
-                                                1, self.params.projection_strategy)
+                                                1, self.params.projection_strategy, 
+                                                t_s_layers_ids=self.params.t_s_layers_ids)
             if self.alpha_contrastive > 0.0:
                 loss_contrastive = custom_step.contrastive_step(self.params.train_cardinality, self.hid_projector_contrastive,
                                                                 s_out.hidden_states, t_out.hidden_states,
@@ -406,7 +407,8 @@ class Distiller:
                                                                 teacher_student_prop=self.params.teacher_student_prop,
                                                                 temperature=self.temperature,
                                                                 from_one_sample=self.params.from_one_sample,
-                                                                add_neg_size_constant=self.params.add_neg_size_constant,
+                                                                add_neg_size_constant=self.params.add_neg_size_constant, 
+                                                                t_s_layers_ids=self.params.t_s_layers_ids
                                                                 )
         # reduce strategy, use t2s hiddens and t2s mapping
         elif self.params.align_hiddens == 'reduce' and self.params.t2s_mapping is not None:
@@ -415,7 +417,8 @@ class Distiller:
                                                 t2s_out.hidden_states, t_out.hidden_states,
                                                 t_attn_mask, t_attn_mask, 1,
                                                 self.params.projection_strategy,
-                                                student_split_ids, self.params.student_tok_ids['pad_token'])
+                                                student_split_ids, self.params.student_tok_ids['pad_token'], 
+                                                t_s_layers_ids=self.params.t_s_layers_ids)
             if self.alpha_contrastive > 0.0:
                 loss_contrastive = custom_step.contrastive_step(self.params.train_cardinality,
                                                                 self.hid_projector_contrastive,
@@ -429,7 +432,8 @@ class Distiller:
                                                                 self.params.n_negative_samples,
                                                                 self.params.teacher_student_prop,
                                                                 self.temperature, self.params.from_one_sample,
-                                                                self.params.add_neg_size_constant)
+                                                                self.params.add_neg_size_constant, 
+                                                                t_s_layers_ids=self.params.t_s_layers_ids)
         # no alignment strategy for hiddens specified
         elif self.params.align_hiddens is None and self.params.matching_ids is not None:
             if self.alpha_contrastive > 0.0:

@@ -60,7 +60,7 @@ max_len = max(len(t_ids) for t_ids in s2t_vocab_cut.values())
 assert max_len == cut_len
 
 pad_token = teacher_vocab_size
-s2t_vocab_cut_padded = teacher_vocab_size * np.ones((student_vocab_size + 1, max_len), dtype=np.int64)
+s2t_vocab_cut_padded = pad_token * np.ones((student_vocab_size + 1, max_len), dtype=np.int64)
 s2t_idxs_cut_padded = np.zeros_like(s2t_vocab_cut_padded, dtype=np.int64)
 
 for s_id in s2t_vocab_cut.keys():
