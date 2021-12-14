@@ -124,7 +124,11 @@ def main():
                         average_by_layers -- average student and teacher hidden representations by layers (m-n mapping to 1-1 mapping)
                         select_by_ids -- select teacher and student layers ids using argument `t_s_layers_ids`
                         """)
-    parser.add_argument('--t_s_layers_ids', type=json.loads, nargs='?')
+    parser.add_argument('--t_s_layers_ids', type=json.loads, nargs='?', 
+                       help="""Teacher and student hidden layer ids in the form {'teacher': id, 'student': id}. 
+                       Works with `select_by_ids` option only.""")
+    parser.add_argument('--project_to', choices=['teacher', 'student', 'intermediate'], default='teacher')
+    parser.add_argument('--intermediate_dim', type=int, nargs='?')
 
     parser.add_argument(
         "--alpha_cos", default=0.0, type=float, help="Linear weight of the cosine embedding loss. Must be >=0."
@@ -186,6 +190,28 @@ def main():
     kl_match_group.add_argument('--matching_ids', nargs='?')
 
     parser.add_argument('--align_hiddens', choices=['match', 'reduce', None], default=None)
+
+    subparsers = parser.add_subparsers(help="""Specific options""")
+    hyp = subparsers.add_parser('hyperbolic')
+    hyp.add_argument('--c', type=float, default=1.0, help="""Negative curvature value""")
+    hyp.add_argument('--train_x', action='store_true')
+
+    hyp.add_argument('--init_c', choices=['precompute_from_teacher', 'precompute_from_student', None], 
+                                default=None, 
+                                help="""precompute* -- precompute curvature from teacher/student outputs via Gromov product""")
+    hyp.add_argument('--n_samples_to_precompute_c', type=int, default=100)
+    hyp.add_argument('--adjust_c', choices=['train_exp_map_teacher', 
+                                            'train_exp_map_student', 
+                                            'recompute_after_epoch', 
+                                            'train_log_map_teacher', 
+                                            'train_log_map_student', None], default=None)
+    hyp.add_argument('--riemannian', action='store_false')
+
+    hyp.add_argument('--use_log_mapping', action='store_true')
+
+    hyp_linear = hyp.add_argument_group("Options for hyperbolic linear layers")
+    hyp_linear.add_argument('--use_bias', action='store_false')
+    hyp_linear.add_argument('--use_hyperbolic_projections', action='store_true')
 
     args = parser.parse_args()
 
