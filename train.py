@@ -200,6 +200,12 @@ def main():
                                 default=None, 
                                 help="""precompute* -- precompute curvature from teacher/student outputs via Gromov product""")
     hyp.add_argument('--n_samples_to_precompute_c', type=int, default=100)
+    hyp.add_argument('--n_components', type=int, default=100, 
+                    help="""reduce output feature space (vocab_size) to n_components; 
+                    works with `init_c=precompute*`""")
+    hyp.add_argument('--n_tries', type=int, default=1, 
+                    help="""number of sampling tries to precompute delta and diam, 
+                    works with `init_c=precompute*`""")
     hyp.add_argument('--adjust_c', choices=['train_exp_map_teacher', 
                                             'train_exp_map_student', 
                                             'recompute_after_epoch', 

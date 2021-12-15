@@ -189,8 +189,10 @@ class Distiller:
             if self.params.init_c == 'precompute_from_teacher':
                 delta_, diam = delta.get_delta(self.teacher, self.valid_dataloader, 
                                               't_ids', 't_lengths', 
+                                              self.params.local_rank, self.multi_gpu, 
                                               self.params.n_samples_to_precompute_c, 
-                                              self.params.local_rank, self.multi_gpu
+                                              self.params.n_components, 
+                                              self.params.n_tries
                                               )
                 self.c = delta.calculate_c(delta_, diam)
             elif self.params.init_c == 'precompute_from_student':
@@ -200,8 +202,10 @@ class Distiller:
                     s_ids, s_lengths = 's_ids', 's_lengths'
                 delta_, diam = delta.get_delta(self.student, self.valid_dataloader, 
                                                s_ids, s_lengths, 
+                                               self.params.local_rank, self.multi_gpu, 
                                                self.params.n_samples_to_precompute_c, 
-                                               self.params.local_rank, self.multi_gpu
+                                               self.params.n_components, 
+                                               self.params.n_tries
                                               )
                 self.c = delta.calculate_c(delta_, diam)
             else:
@@ -944,14 +948,17 @@ class Distiller:
         self.total_valid_loss_epoch = 0
         self.n_valid_iter_epoch = 0
 
+        # recompute from student anyway, as teacher is frozen
         if hasattr(self, 'recompute_c') and self.recompute_c:
             if self.params.align_hiddens == 'reduce':
                 s_ids, s_lengths = 't2s_ids', 't2s_lengths'
             else:
                 s_ids, s_lengths = 's_ids', 's_lengths'
             delta_, diam = delta.get_delta(self.student, self.valid_dataloader, 
-                                           s_ids, s_lengths, self.params.n_samples_to_precompute_c, 
-                                           self.params.local_rank, self.multi_gpu
+                                           s_ids, s_lengths, 
+                                           self.params.local_rank, self.multi_gpu, 
+                                           self.params.n_samples_to_precompute_c, 
+                                           self.params.n_components, self.params.n_tries
                                           )
             self.c = delta.calculate_c(delta_, diam)
 

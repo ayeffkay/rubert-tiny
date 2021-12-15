@@ -1,6 +1,6 @@
 import torch
-import torch.nn.functional as F
 from scipy.spatial import distance_matrix
+from sklearn.decomposition import PCA
 import numpy as np
 from tqdm import tqdm
 
@@ -16,7 +16,8 @@ def calculate_c(delta, diam):
     return (0.144 / rel_delta) ** 2
 
 def get_delta(model, dataloader, ids_field, lengths_field, 
-              n_samples_slct, cuda_no, multi_gpu):
+              cuda_no, multi_gpu, 
+              n_samples_slct=1000, n_components=100, n_tries=3):
     features = []
     model.eval()
 
@@ -35,10 +36,19 @@ def get_delta(model, dataloader, ids_field, lengths_field,
             # if logits will not be casted, we need to cat all features (!this is too long)
             features.extend(logits.detach().cpu().tolist())
             total_samples += len(logits)
-    idxs_slct = np.random.choice(total_samples, size=n_samples_slct, replace=False)   
-    features = np.vstack([np.array(features[i]) for i in idxs_slct])
-    dists = distance_matrix(features, features)
-    delta = hypdelta.delta_hyp(dists)
-    diam = np.max(dists)
+    deltas = 0; diams = 0
+    for _ in n_tries:
+        idxs_slct = np.random.choice(total_samples, size=n_samples_slct, replace=False)   
+        features = np.vstack([np.array(features[i]) for i in idxs_slct])
+        pca = PCA(n_components=min((n_components, features.shape[0], features.shape[1])))
+        features_reduced= pca.fit_transform(features)
+        dists = distance_matrix(features_reduced, features_reduced)
+        delta = hypdelta.delta_hyp(dists)
+        diam = np.max(dists)
+        deltas += delta
+        diams += diam
 
-    return delta, diam
+    deltas /= n_tries
+    diams /= n_tries
+
+    return deltas, diams
