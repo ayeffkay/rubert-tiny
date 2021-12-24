@@ -263,12 +263,13 @@ def main():
     args.train_size = len(train_data)
     args.valid_size = len(valid_data)
 
-    if args.align_hiddens == 'match':
-        negative_samples_col = 2 if args.negative_sampling_strategy == 'teacher' else 3
-        args.train_cardinality = sum(np.count_nonzero(row[negative_samples_col]) for row in train_data)
-    else:
-        negative_samples_col = 0 if args.negative_sampling_strategy in 'teacher' else 1
-        args.train_cardinality = sum(len(row[negative_samples_col]) for row in train_data)
+    if args.negative_sampling_strategy is not None:
+        if args.align_hiddens == 'match':
+            negative_samples_col = 2 if args.negative_sampling_strategy == 'teacher' else 3
+            args.train_cardinality = sum(np.count_nonzero(row[negative_samples_col]) for row in train_data)
+        else:
+            negative_samples_col = 0 if args.negative_sampling_strategy in 'teacher' else 1
+            args.train_cardinality = sum(len(row[negative_samples_col]) for row in train_data)
 
     train_lm_seq_dataset = LmSeqsDataset(params=args, all_tokens=train_data)
     valid_lm_seq_dataset = LmSeqsDataset(params=args, all_tokens=valid_data)
