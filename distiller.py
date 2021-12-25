@@ -28,7 +28,6 @@ except ImportError:
 
 from transformers import AutoConfig
 
-from functools import partial
 import custom_step
 import hyptorch.nn as hypnn
 import hyptorch.pmath as hypmath
@@ -179,81 +178,6 @@ class Distiller:
                                                                             factor=params.reduce_factor, patience=params.valid_epochs_patience, 
                                                                             threshold=1e-2, cooldown=params.valid_epochs_patience, 
                                                                             eps=1e-10, min_lr=1e-6, verbose=True)
-
-        """
-            Curvature initialization
-        """
-
-        if hasattr(self.params, 'c'):
-            logger.info("--- Initializing curvature...")
-            if self.params.init_c == 'precompute_from_teacher':
-                delta_, diam = delta.get_delta(self.teacher, self.valid_dataloader, 
-                                              't_ids', 't_lengths', 
-                                              self.params.local_rank, self.multi_gpu, 
-                                              self.params.n_samples_to_precompute_c, 
-                                              self.params.n_components, 
-                                              self.params.n_tries
-                                              )
-                self.c = delta.calculate_c(delta_, diam)
-            elif self.params.init_c == 'precompute_from_student':
-                if self.params.align_hiddens == 'reduce':
-                    s_ids, s_lengths = 't2s_ids', 't2s_lengths'
-                else:
-                    s_ids, s_lengths = 's_ids', 's_lengths'
-                delta_, diam = delta.get_delta(self.student, self.valid_dataloader, 
-                                               s_ids, s_lengths, 
-                                               self.params.local_rank, self.multi_gpu, 
-                                               self.params.n_samples_to_precompute_c, 
-                                               self.params.n_components, 
-                                               self.params.n_tries
-                                              )
-                self.c = delta.calculate_c(delta_, diam)
-            else:
-                self.c = self.params.c
-
-            logger.info("--- Curvature was set to {:.2f}".format(self.c))
-
-            self.recompute_c = self.params.adjust_c == 'recompute_after_epoch'
-            self.teacher_to_poincare = hypnn.ToPoincare(self.c, train_c=self.params.adjust_c == 'train_exp_map_teacher', 
-                                                        train_x=self.params.train_x, 
-                                                        ball_dim=teacher.config.hidden_size, 
-                                                        riemannian=self.params.riemannian).to(f'cuda:{params.local_rank}')
-            self.student_to_poincare = hypnn.ToPoincare(self.c, train_c= self.params.adjust_c == 'train_exp_map_student', 
-                                                        train_x=self.params.train_x, 
-                                                        ball_dim=student.config.hidden_size, 
-                                                        riemannian=self.params.riemannian).to(f'cuda:{params.local_rank}')
-            if self.params.use_log_mapping:
-                self.teacher_from_poincare = hypnn.FromPoincare(self.c, train_c = self.params.adjust_c == 'train_log_map_teacher', 
-                                                                train_x = self.params.train_x, 
-                                                                ball_dim = teacher.config.hidden_size).to(f'cuda:{params.local_rank}')
-                self.student_from_poincare = hypnn.FromPoincare(self.c, train_c = self.params.adjust_c == 'train_log_map_student', 
-                                                                train_x = self.params.train_x, 
-                                                                ball_dim=student.config.hidden_size).to(f'cuda:{params.local_rank}')
-
-
-            if self.params.adjust_c == 'train_exp_map_teacher':
-                self.optimizer.add_param_group({
-                    "params": self.teacher_to_poincare.parameters(), 
-                    "weight_decay": 0.0
-                })
-            elif self.params.adjust_c == 'train_exp_map_student':
-                self.optimizer.add_param_group({
-                    "params": self.student_to_poincare.parameters(), 
-                    "weight_decay": 0.0
-                })
-
-            if self.params.use_log_mapping:
-                if self.params.adjust_c == 'train_log_map_teacher':
-                    self.optimizer.add_param_group({
-                        "params": self.teacher_from_poincare.parameters(), 
-                        "weight_decay": 0.0
-                    })
-                elif self.params.adjust_c == 'train_log_map_student':
-                    self.optimizer.add_param_group({
-                        "params": self.student_from_poincare.parameters(), 
-                        "weight_decay": 0.0
-                    })
-
                                                         
         if self.alpha_ce > 0.0:   
             self.last_loss_ce = 0
@@ -263,98 +187,121 @@ class Distiller:
             self.last_loss_mlm = 0
             self.last_valid_loss_mlm_epoch = 0
             self.lm_loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
+
+        layers_ct = 4 if self.params.projection_strategy in ['last', 'skip', 'average'] else 1
         if self.alpha_mse > 0.0:
             self.last_loss_mse = 0
             self.last_valid_loss_mse_epoch = 0
             self.mse_loss_fct = nn.MSELoss(reduction='sum')
 
-            layers_ct = 4 if self.params.projection_strategy in ['last', 'skip', 'average'] else 1
-
-            if 'teacher' in self.params.project_to:
-                if hasattr(self.params, 'c') and self.params.use_hyperbolic_projections:
-                    self.hid_projectors_mse_student = nn.ModuleList([hypnn.HypLinear(student.config.hidden_size, 
-                                                                    teacher.config.hidden_size, 
-                                                                    self.c, self.params.use_bias).to(f'cuda:{params.local_rank}') for _ in range(layers_ct)])
-
-                else:
-                    self.hid_projectors_mse_student = nn.ModuleList([nn.Linear(student.config.hidden_size, 
+            if self.params.project_to == 'teacher':
+                self.hid_projectors_mse_student = nn.ModuleList([nn.Linear(student.config.hidden_size, 
                                                                     teacher.config.hidden_size).to(f'cuda:{params.local_rank}') for _ in range(layers_ct)])
                 self.hid_projectors_mse_teacher = None
 
-            elif 'student' in self.params.project_to:
-                if hasattr(self.params, 'c') and self.params.use_hyperbolic_projections:
-                    self.hid_projectors_mse_teacher = nn.ModuleList([hypnn.HypLinear(teacher.config.hidden_size, 
-                                                                    student.config.hidden_size, 
-                                                                    self.c, self.params.use_bias).to(f'cuda:{params.local_rank}') for _ in range(layers_ct)])
-
-                else:
-                    self.hid_projectors_mse_teacher = nn.ModuleList([nn.Linear(teacher.config.hidden_size, 
-                                                                    student.config.hidden_size).to(f'cuda:{params.local_rank}') for _ in range(layers_ct)])
-                    self.hid_projectors_mse_student = None
-            
+            elif self.params.project_to == 'student':
+                self.hid_projectors_mse_teacher = nn.ModuleList([nn.Linear(teacher.config.hidden_size, 
+                                                                student.config.hidden_size).to(f'cuda:{params.local_rank}') for _ in range(layers_ct)])
+                self.hid_projectors_mse_student = None
+        
             else:
-                if hasattr(self.params, 'use_hyperbolic_projections') and self.params.use_hyperbolic_projections:
-                    self.hid_projectors_mse_teacher = nn.ModuleList([hypnn.HypLinear(teacher.config.hidden_size, 
-                                                                    self.params.intermediate_dim, 
-                                                                    self.c, self.params.use_bias).to(f'cuda:{params.local_rank}') for _ in range(layers_ct)])
-                    self.hid_projectors_mse_student = nn.ModuleList([hypnn.HypLinear(student.config.hidden_size, 
-                                                                    self.params.intermediate_dim, 
-                                                                    self.c, self.params.use_bias).to(f'cuda:{params.local_rank}') for _ in range(layers_ct)])  
-
-                else:
-                    self.hid_projectors_mse_teacher = nn.ModuleList([nn.Linear(teacher.config.hidden_size, 
-                                                                    self.params.intermediate_dim).to(f'cuda:{params.local_rank}') for _ in range(layers_ct)])
-                    self.hid_projectors_mse_student = nn.ModuleList([nn.Linear(student.config.hidden_size, 
-                                                                    self.params.intermediate_dim).to(f'cuda:{params.local_rank}') for _ in range(layers_ct)])
+                self.hid_projectors_mse_teacher = nn.ModuleList([nn.Linear(teacher.config.hidden_size, 
+                                                                self.params.intermediate_dim).to(f'cuda:{params.local_rank}') for _ in range(layers_ct)])
+                self.hid_projectors_mse_student = nn.ModuleList([nn.Linear(student.config.hidden_size, 
+                                                                self.params.intermediate_dim).to(f'cuda:{params.local_rank}') for _ in range(layers_ct)])
 
         if self.alpha_cos > 0.0:
             self.last_loss_cos = 0
             self.last_valid_loss_cos_epoch = 0
             self.cosine_loss_fct = nn.CosineEmbeddingLoss(reduction="mean")
             ## TODO: self.attn_projector
+
+        self.s_hid_dim = student.config.hidden_size
+        self.t_hid_dim = teacher.config.hidden_size
+
+        self.do_hyperbolic_mapping_in_step = True 
         if self.alpha_contrastive > 0.0:
             self.last_loss_contrastive = 0
             self.last_valid_loss_contrastive_epoch = 0
-            
-            layers_ct = 4 if self.params.projection_strategy in ['last', 'skip', 'average'] else 1
-            if 'teacher' in self.params.project_to:
-                self.hid_projectors_contrastive_teacher = None
-                if hasattr(self.params, 'use_hyperbolic_projections') and self.params.use_hyperbolic_projections:
-                    self.hid_projectors_contrastive_student = nn.ModuleList([hypnn.HypLinear(student.config.hidden_size, 
-                                                                            teacher.config.hidden_size, 
-                                                                            self.params.c, self.params.use_bias).to(f'cuda:{params.local_rank}') for _ in range(layers_ct)])
 
+
+            if params.hidden_distil_type == 'hyperbolic':
+                self.similarity_metric = hypmath.dist
+                self.c = params.c
+                if params.init_c == 'precompute_from_teacher':
+                    delta_, diam = delta.get_delta(self.teacher, self.valid_dataloader, 
+                                                    't_ids', 't_lengths', 
+                                                    self.params.local_rank, self.multi_gpu, 
+                                                    self.params.n_samples_to_precompute_c, 
+                                                    self.params.n_components, 
+                                                    self.params.n_tries)
+                    self.c = delta.calculate_c(delta_, diam)
+                elif self.params.init_c == 'precompute_from_student':
+                    if self.params.align_hiddens == 'reduce':
+                        s_ids, s_lengths = 't2s_ids', 't2s_lengths'
+                    else:
+                        s_ids, s_lengths = 's_ids', 's_lengths'
+                    delta_, diam = delta.get_delta(self.student, self.valid_dataloader, 
+                                                    s_ids, s_lengths, 
+                                                    self.params.local_rank, self.multi_gpu, 
+                                                    self.params.n_samples_to_precompute_c, 
+                                                    self.params.n_components, 
+                                                    self.params.n_tries)
+                    self.c = delta.calculate_c(delta_, diam)
                 else:
-                    self.hid_projectors_contrastive_student = nn.ModuleList([nn.Linear(student.config.hidden_size, 
-                                                                            teacher.config.hidden_size).to(f'cuda:{params.local_rank}') for _ in range(layers_ct)])
+                    self.c = self.params.c
 
+                if params.use_hyperbolic_projections:
 
-            elif 'student' in self.params.project_to:
-                self.hid_projectors_contrastive_student = None
-                if hasattr(self.params, 'use_hyperbolic_projections') and self.params.use_hyperbolic_projections:
-                    self.hid_projectors_contrastive_teacher = nn.ModuleList([hypnn.HypLinear(teacher.config.hidden_size, 
-                                                                            student.config.hidden_size, 
-                                                                            self.params.c, self.params.use_bias).to(f'cuda:{params.local_rank}') for _ in range(layers_ct)])
-
+                    s_ball_dim = self.s_hid_dim
+                    t_ball_dim = self.t_hid_dim
+                    if self.params.project_to == 'teacher':
+                        self.hid_projectors_contrastive_teacher = None
+                        self.hid_projectors_contrastive_student = nn.ModuleList([hypnn.HypLinear(self.s_hid_dim, self.t_hid_dim, 
+                                                                                                 self.c, params.use_bias).to(f'cuda:{params.local_rank}') for _ in range(layers_ct)])
+                    elif params.project_to =='student':
+                        self.hid_projectors_contrastive_student = None
+                        self.hid_projectors_contrastive_teacher = nn.ModuleList([hypnn.HypLinear(self.t_hid_dim, self.s_hid_dim, 
+                                                                                                 self.c, params.use_bias).to(f'cuda:{params.local_rank}') for _ in range(layers_ct)])
+                    else:
+                        self.hid_projectors_contrastive_student = nn.ModuleList([hypnn.HypLinear(self.s_hid_dim, params.intermediate_dim, 
+                                                                                                 self.c, params.use_bias).to(f'cuda:{params.local_rank}') for _ in range(layers_ct)])
+                        self.hid_projectors_contrastive_teacher = nn.ModuleList([hypnn.HypLinear(self.t_hid_dim, params.intermediate_dim, 
+                                                                                                 self.c, params.use_bias).to(f'cuda:{params.local_rank}') for _ in range(layers_ct)])
                 else:
-                    self.hid_projectors_contrastive_teacher = nn.ModuleList([nn.Linear(teacher.config.hidden_size, 
-                                                                            student.config.hidden_size).to(f'cuda:{params.local_rank}') for _ in range(layers_ct)])
-            
+                    if params.project_to == 'teacher':
+                        s_ball_dim = self.t_hid_dim
+                        t_ball_dim = self.t_hid_dim
+                    elif params.project_to == 'student':
+                        s_ball_dim = self.s_hid_dim
+                        t_ball_dim = self.s_hid_dim
+                    else:
+                        s_ball_dim = params.intermediate_dim
+                        t_ball_dim = params.intermediate_dim
+                
+                self.student_to_poincare = hypnn.ToPoincare(self.c, train_c=params.adjust_c == 'train_exp_map_student', 
+                                                            train_x=params.train_x, ball_dim=s_ball_dim, riemannian=params.riemannian)
+                self.teacher_to_poincare = hypnn.ToPoincare(self.c, train_c=params.adjust_c == 'train_exp_map_teacher', 
+                                                            train_x=params.train_x, ball_dim=t_ball_dim, riemannian=params.riemannian)
+                if params.adjust_c == 'train_exp_map_student':
+                    self.optimizer.add_param_group({'params': self.student_to_poincare.parameters()})
+                elif params.adjust_c == 'train_exp_map_teacher':
+                    self.optimizer.add_param_group({'params': self.teacher_to_poincare.parameters()})
             else:
-                if hasattr(self.params, 'use_hyperbolic_projections') and self.params.use_hyperbolic_projections:
-                    self.hid_projectors_contrastive_teacher = nn.ModuleList([hypnn.HypLinear(teacher.config.hidden_size, 
-                                                                            self.params.intermediate_dim, 
-                                                                            self.params.c, self.params.use_bias).to(f'cuda:{params.local_rank}') for _ in range(layers_ct)])
-                    self.hid_projectors_contrastive_student = nn.ModuleList([hypnn.HypLinear(student.config.hidden_size, 
-                                                                            self.params.intermediate_dim, 
-                                                                            self.params.c, self.params.use_bias).to(f'cuda:{params.local_rank}') for _ in range(layers_ct)])  
+                self.similarity_metric = custom_step.cosine_similarity
 
+
+            if params.hidden_distil_type is None or (params.hidden_distil_type == 'hyperbolic' and not params.use_hyperbolic_projections):
+                self.do_hyperbolic_mapping_in_step = True
+                if params.project_to == 'teacher':
+                    self.hid_projectors_contrastive_teacher = None
+                    self.hid_projectors_contrastive_student = nn.ModuleList([nn.Linear(self.s_hid_dim, self.t_hid_dim).to(f'cuda:{self.params.local_rank}') for _ in range(layers_ct)])
+                elif params.project_to =='student':
+                    self.hid_projectors_contrastive_student = None
+                    self.hid_projectors_contrastive_teacher = nn.ModuleList([nn.Linear(self.t_hid_dim, self.s_hid_dim).to(f'cuda:{self.params.local_rank}') for _ in range(layers_ct)])
                 else:
-                    self.hid_projectors_contrastive_teacher = nn.ModuleList([nn.Linear(teacher.config.hidden_size, 
-                                                                            self.params.intermediate_dim).to(f'cuda:{params.local_rank}') for _ in range(layers_ct)])
-                    self.hid_projectors_contrastive_student = nn.ModuleList([nn.Linear(student.config.hidden_size, 
-                                                                            self.params.intermediate_dim).to(f'cuda:{params.local_rank}') for _ in range(layers_ct)])
-
+                    self.hid_projectors_contrastive_student = nn.ModuleList([nn.Linear(self.s_hid_dim, params.intermediate_dim).to(f'cuda:{self.params.local_rank}') for _ in range(layers_ct)])
+                    self.hid_projectors_contrastive_teacher = nn.ModuleList([nn.Linear(self.t_hid_dim, params.intermediate_dim).to(f'cuda:{self.params.local_rank}') for _ in range(layers_ct)])
  
 
     @staticmethod
@@ -542,10 +489,9 @@ class Distiller:
                 loss_ce = custom_step.ce_step(student_mapped_logits, teacher_mapped_logits, 
                                               self.ce_loss_fct, self.temperature)
 
-        use_hyp_mapping_in_step = False
-        if (self.alpha_mse + self.alpha_contrastive > 0.0 and 
-            hasattr(self, 'teacher_to_poincare') and hasattr(self, 'student_to_poincare') and 
+        if (self.alpha_contrastive > 0.0 and self.params.hidden_distil_type == 'hyperbolic' and 
             self.params.use_hyperbolic_projections):
+
                 t_hiddens = [self.teacher_to_poincare(t, c=self.c) for t in t_out.hidden_states]
                 if self.params.align_hiddens == 'reduce':
                     s_hiddens = [self.student_to_poincare(s, c=self.c) for s in t2s_out.hidden_states]
@@ -558,13 +504,6 @@ class Distiller:
                 s_hiddens = t2s_out.hidden_states
             else:
                 s_hiddens = s_out.hidden_states
-            if hasattr(self, 'teacher_to_poincare') and hasattr(self, 'student_to_poincare'):
-                use_hyp_mapping_in_step = True
-
-        if hasattr(self.params, 'c') and self.params.use_log_mapping:
-            metric = partial(hypmath.dist, c=self.c)
-        else:
-            metric = custom_step.cosine_similarity
 
         # match strategy, use s outputs
         if self.params.align_hiddens == 'match' and self.params.matching_ids is not None:
@@ -576,12 +515,7 @@ class Distiller:
                                                 s_hiddens, t_hiddens,
                                                 student_mask, teacher_mask, 
                                                 1, self.params.projection_strategy, 
-                                                t_s_layers_ids=self.params.t_s_layers_ids, 
-                                                use_hyp_mapping_in_step=use_hyp_mapping_in_step, 
-                                                c=self.c if hasattr(self, 'c') else None, 
-                                                teacher_to_poincare=self.teacher_to_poincare if hasattr(self, 'teacher_to_poincare') else None, 
-                                                student_to_poincare=self.student_to_poincare if hasattr(self, 'student_to_poincare') else None
-                                                )
+                                                t_s_layers_ids=self.params.t_s_layers_ids)
             if self.alpha_contrastive > 0.0:
                 loss_contrastive = custom_step.contrastive_step(self.params.train_cardinality, 
                                                                 self.hid_projectors_contrastive_student,
@@ -596,8 +530,8 @@ class Distiller:
                                                                 from_one_sample=self.params.from_one_sample,
                                                                 add_neg_size_constant=self.params.add_neg_size_constant, 
                                                                 t_s_layers_ids=self.params.t_s_layers_ids, 
-                                                                similarity_metric=metric, 
-                                                                use_hyp_mapping_in_step=use_hyp_mapping_in_step, 
+                                                                similarity_metric=self.similarity_metric, 
+                                                                use_hyp_mapping_in_step=self.do_hyperbolic_mapping_in_step, 
                                                                 c=self.c if hasattr(self, 'c') else None, 
                                                                 teacher_to_poincare=self.teacher_to_poincare if hasattr(self, 'teacher_to_poincare') else None, 
                                                                 student_to_poincare=self.student_to_poincare if hasattr(self, 'student_to_poincare') else None)
@@ -612,11 +546,7 @@ class Distiller:
                                                 t_attn_mask, t_attn_mask, 1,
                                                 self.params.projection_strategy,
                                                 student_split_ids, self.params.student_tok_ids['pad_token'], 
-                                                t_s_layers_ids=self.params.t_s_layers_ids, 
-                                                use_hyp_mapping_in_step=use_hyp_mapping_in_step, 
-                                                c=self.c if hasattr(self, 'c') else None, 
-                                                teacher_to_poincare=self.teacher_to_poincare if hasattr(self, 'teacher_to_poincare') else None, 
-                                                student_to_poincare=self.student_to_poincare if hasattr(self, 'student_to_poincare') else None)
+                                                t_s_layers_ids=self.params.t_s_layers_ids)
             if self.alpha_contrastive > 0.0:
                 loss_contrastive = custom_step.contrastive_step(self.params.train_cardinality,
                                                                 self.hid_projectors_contrastive_student, 
@@ -633,14 +563,15 @@ class Distiller:
                                                                 self.temperature, self.params.from_one_sample,
                                                                 self.params.add_neg_size_constant, 
                                                                 t_s_layers_ids=self.params.t_s_layers_ids, 
-                                                                similarity_metric=metric, 
-                                                                use_hyp_mapping_in_step=use_hyp_mapping_in_step, 
+                                                                similarity_metric=self.similarity_metric, 
+                                                                use_hyp_mapping_in_step=self.do_hyperbolic_mapping_in_step, 
                                                                 c=self.c if hasattr(self, 'c') else None, 
                                                                 teacher_to_poincare=self.teacher_to_poincare if hasattr(self, 'teacher_to_poincare') else None, 
                                                                 student_to_poincare=self.student_to_poincare if hasattr(self, 'student_to_poincare') else None)
         # no alignment strategy for hiddens specified
         elif self.params.align_hiddens is None and self.params.matching_ids is not None:
             if self.alpha_contrastive > 0.0:
+                # TODO: correct for hyperbolic layers
                 loss_contrastive = custom_step.contrastive_step_v0(self.params.train_cardinality,
                                                                    self.hid_projectors_contrastive_student, 
                                                                    s_hiddens, t_hiddens,
@@ -683,8 +614,6 @@ class Distiller:
                 self.last_loss_mlm = loss_mlm.item()
             if self.alpha_mse > 0.0:
                 self.last_loss_mse = loss_mse.item()
-            if self.alpha_cos > 0.0:
-                self.last_loss_cos = loss_cos.item()  # todo: where is loss_cos defenition?
             if self.alpha_contrastive > 0.0:
                 self.last_loss_contrastive = loss_contrastive.item()
             self.n_sequences_epoch += t_ids.size(0) * self.params.gpus
@@ -698,8 +627,6 @@ class Distiller:
                 self.last_valid_loss_mlm_epoch += loss_mlm.item()
             if self.alpha_mse > 0.0:
                 self.last_valid_loss_mse_epoch += loss_mse.item()
-            if self.alpha_cos > 0.0:
-                self.last_valid_loss_cos_epoch += loss_cos.item()
             if self.alpha_contrastive > 0.0:
                 self.last_valid_loss_contrastive_epoch += loss_contrastive.item()
 
@@ -735,11 +662,6 @@ class Distiller:
                     self.c = self.teacher_to_poincare.c
                 elif self.params.adjust_c == 'train_exp_map_student':
                     self.c = self.student_to_poincare.c
-                elif self.params.use_log_mapping:
-                    if self.params.adjust_c == 'train_log_map_teacher':
-                        self.c = self.teacher_from_poincare.c
-                    elif self.params.adjust_c == 'train_log_map_student':
-                        self.c = self.student_from_poincare.c
 
             self.n_gradient_updates_epoch += 1
             self.n_gradient_updates_total += 1

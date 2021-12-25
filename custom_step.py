@@ -111,10 +111,6 @@ def mse_step(hid_projectors_mse_student,
             s = hid_projectors_mse_student[i](s)
         if hid_projectors_mse_teacher is not None:
             t = hid_projectors_mse_teacher[i](t)
-        if kwargs.get('use_hyp_mapping_in_step', False):
-            c = kwargs['c']
-            s = kwargs['student_to_poincare'](s, c)
-            t = kwargs['teacher_to_poincare'](t, c)
         loss_mse += mse_loss_fct(s, t) / b_size
     return loss_mse
 
@@ -154,6 +150,11 @@ def contrastive_step(train_cardinality,
         if hid_projectors_contrastive_teacher is not None:
             t = hid_projectors_contrastive_teacher[i](t)
 
+        if kwargs.get('use_hyp_mapping_in_step', False):
+            c = kwargs['c']
+            s = kwargs['student_to_poincare'](s, c)
+            t = kwargs['teacher_to_poincare'](t, c)
+
         # loop by b*seq_len, here t.size(0) = s.size(0) as get_t_s_hiddens returns aligned sequences
         b_seq_len = t.size(0)
 
@@ -172,7 +173,7 @@ def contrastive_step(train_cardinality,
                 stud_hid_proj = torch.cat((stud_hid_proj, s_mismatches), dim=0)
                 s_mismatches_ct += s_mismatches.size(0)
 
-            if 'teacher' in negative_sampling_strategy: 
+            elif 'teacher' in negative_sampling_strategy: 
                 t_mismatches = layer_mismatches[1]
                 if hid_projectors_contrastive_teacher is not None:
                     t_mismatches = hid_projectors_contrastive_teacher[i](t_mismatches)

@@ -191,7 +191,7 @@ def main():
 
     parser.add_argument('--align_hiddens', choices=['match', 'reduce', None], default=None)
 
-    subparsers = parser.add_subparsers(help="""Specific options""")
+    subparsers = parser.add_subparsers(help="""Specific options""", dest="hidden_distil_type")
     hyp = subparsers.add_parser('hyperbolic')
     hyp.add_argument('--c', type=float, default=1.0, help="""Negative curvature value""")
     hyp.add_argument('--train_x', action='store_true')
@@ -208,12 +208,8 @@ def main():
                     works with `init_c=precompute*`""")
     hyp.add_argument('--adjust_c', choices=['train_exp_map_teacher', 
                                             'train_exp_map_student', 
-                                            'recompute_after_epoch', 
-                                            'train_log_map_teacher', 
-                                            'train_log_map_student', None], default=None)
+                                            'recompute_after_epoch', None], default=None)
     hyp.add_argument('--riemannian', action='store_false')
-
-    hyp.add_argument('--use_log_mapping', action='store_true')
 
     hyp_linear = hyp.add_argument_group("Options for hyperbolic linear layers")
     hyp_linear.add_argument('--use_bias', action='store_false')
@@ -295,12 +291,13 @@ def main():
     args.train_size = len(train_data)
     args.valid_size = len(valid_data)
 
-    if args.align_hiddens == 'match':
-        negative_samples_col = 2 if args.negative_sampling_strategy == 'teacher' else 3
-        args.train_cardinality = sum(np.count_nonzero(row[negative_samples_col]) for row in train_data)
-    else:
-        negative_samples_col = 0 if args.negative_sampling_strategy in 'teacher' else 1
-        args.train_cardinality = sum(len(row[negative_samples_col]) for row in train_data)
+    if args.negative_sampling_strategy is not None:
+        if args.align_hiddens == 'match':
+            negative_samples_col = 2 if args.negative_sampling_strategy == 'teacher' else 3
+            args.train_cardinality = sum(np.count_nonzero(row[negative_samples_col]) for row in train_data)
+        else:
+            negative_samples_col = 0 if args.negative_sampling_strategy in 'teacher' else 1
+            args.train_cardinality = sum(len(row[negative_samples_col]) for row in train_data)
 
     train_lm_seq_dataset = LmSeqsDataset(params=args, all_tokens=train_data)
     valid_lm_seq_dataset = LmSeqsDataset(params=args, all_tokens=valid_data)

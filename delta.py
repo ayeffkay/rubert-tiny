@@ -8,12 +8,15 @@ import custom_step
 import distiller
 
 import hyptorch.delta as hypdelta
+from utils import logger
 
 
 
 def calculate_c(delta, diam):
     rel_delta = (2 * delta) / diam
-    return (0.144 / rel_delta) ** 2
+    c = (0.144 / rel_delta) ** 2
+    logger.info('Curvature initialized to {:.4f}'.format(c))
+    return c
 
 def get_delta(model, dataloader, ids_field, lengths_field, 
               cuda_no, multi_gpu, 
@@ -37,12 +40,13 @@ def get_delta(model, dataloader, ids_field, lengths_field,
             features.extend(logits.detach().cpu().tolist())
             total_samples += len(logits)
     deltas = 0; diams = 0
-    for _ in n_tries:
+    for _ in range(n_tries):
         idxs_slct = np.random.choice(total_samples, size=n_samples_slct, replace=False)   
-        features = np.vstack([np.array(features[i]) for i in idxs_slct])
-        pca = PCA(n_components=min((n_components, features.shape[0], features.shape[1])))
-        features_reduced= pca.fit_transform(features)
-        dists = distance_matrix(features_reduced, features_reduced)
+        features_np = np.vstack([np.array(features[i]) for i in idxs_slct])
+        if n_components > 0:
+            pca = PCA(n_components=min((n_components, features_np.shape[0], features_np.shape[1])))
+            features_np = pca.fit_transform(features_np)
+        dists = distance_matrix(features_np, features_np)
         delta = hypdelta.delta_hyp(dists)
         diam = np.max(dists)
         deltas += delta
