@@ -101,11 +101,11 @@ def mse_step(hid_projectors_mse_student,
              mse_loss_fct,
              s_hid, t_hid, s_mask, t_mask, true_label=1,
              proj_strategy=None, student_split_ids=None, 
-             s_pad_token=0, t_s_layers_ids=None, **kwargs):
+             s_pad_token=0, t_s_layers_ids=None):
     loss_mse = 0.0
     for i, (s, t) in enumerate(get_t_s_hiddens(s_hid, t_hid, s_mask, t_mask, true_label,
                                                proj_strategy, student_split_ids, s_pad_token, 
-                                               t_s_layers_ids=t_s_layers_ids)):
+                                               t_s_layers_ids)):
         b_size = t.size(0)
         if hid_projectors_mse_student is not None:
             s = hid_projectors_mse_student[i](s)
