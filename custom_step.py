@@ -140,10 +140,10 @@ def contrastive_step(train_cardinality,
                                      s_mask, t_mask,
                                      false_label, proj_strategy,
                                      student_split_ids, s_pad_token, 
-                                     t_s_layers_ids=t_s_layers_ids)
+                                     t_s_layers_ids)
     for i, (s, t) in enumerate(get_t_s_hiddens(s_hid, t_hid, s_mask, t_mask, true_label,
                                                proj_strategy, student_split_ids, s_pad_token, 
-                                               t_s_layers_ids=t_s_layers_ids)):
+                                               t_s_layers_ids)):
         if hid_projectors_contrastive_student is not None:
             s = hid_projectors_contrastive_student[i](s)
 

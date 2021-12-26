@@ -38,20 +38,20 @@ class Distiller(object):
         self.summary_table = wandb.Table(columns=['Task', 'Metric', 'Validation score', 'Test score'])
 
         # TODO: load data using different tokenizers (now we assume that vocabularies match)
-        train_data, valid_data = load_data.load_glue_dataset(params.glue_dataset, 
+        train_data = load_data.load_glue_dataset(params.glue_dataset, 
                                                             params.tokenizer_name, 
                                                             params.padding, 
                                                             params.truncation, 
-                                                            'train', params.valid_prop, 
+                                                            'train', 0, 
                                                             params.seed)
-        test_data = load_data.load_glue_dataset(params.glue_dataset, 
+        valid_data = load_data.load_glue_dataset(params.glue_dataset, 
                                                 params.tokenizer_name, 
                                                 params.padding, 
                                                 params.truncation, 
                                                 'validation')
         self.train_loader = DataLoader(train_data, params.batch_size, shuffle=True, collate_fn=load_data.collate_fn)
         self.valid_loader = DataLoader(valid_data, params.batch_size, shuffle=False, collate_fn=load_data.collate_fn)
-        self.test_loader = DataLoader(test_data, params.batch_size, shuffle=False, collate_fn=load_data.collate_fn)
+        self.test_loader = DataLoader(valid_data, params.batch_size, shuffle=False, collate_fn=load_data.collate_fn)
 
         self.gpu_id = params.gpu_id
         self.n_classes = train_data.features['labels'].num_classes
@@ -197,10 +197,10 @@ class Distiller(object):
 
             if self.alpha_contrastive > 0.0:
                 hyp_kwargs = dict(use_hyp_mapping_in_step=False)
-                if self.params.hidden_distil_mode == 'hyperbolic':
+                if self.params.hidden_distil_type == 'hyperbolic':
                     if self.params.use_hyperbolic_projections:
-                        t_hiddens = (self.teacher_to_poincare(t, c=self.c) for t in t_out.hidden_states)
-                        s_hiddens = (self.student_to_poincare(s, c=self.c) for s in s_out.hidden_states)
+                        t_hiddens = [self.teacher_to_poincare(t, c=self.c) for t in t_out.hidden_states]
+                        s_hiddens = [self.student_to_poincare(s, c=self.c) for s in s_out.hidden_states]
                     else:
                         hyp_kwargs = dict(use_hyp_mappings_in_step=True, 
                                         c=self.c, 
@@ -212,8 +212,7 @@ class Distiller(object):
                 else:
                     t_hiddens = t_out.hidden_states
                     s_hiddens = s_out.hidden_states
-
-                loss_contrastive = custom_step.contrastive_step(self.train_cardinality, 
+                loss_contrastive = custom_step.contrastive_step(None, 
                                                                 self.hid_projectors_contrastive_student, 
                                                                 self.hid_projectors_contrastive_teacher, 
                                                                 s_hiddens, t_hiddens, attention_mask, attention_mask, 
@@ -405,7 +404,7 @@ class Distiller(object):
         }
 
         if self.params.hidden_distil_type == 'hyperbolic':
-            log_dict['curvature'] = self.c.item() if isinstance(self.c, torch.tensor) else self.c
+            log_dict['curvature'] = self.c.item() if self.params.train_c is not None and 'train' in self.params.train_c else self.c
 
         if self.alpha_ce > 0.0:
             log_dict['train/loss_ce_epoch'] = self.train_loss_ce_epoch / self.n_train_batches_seen

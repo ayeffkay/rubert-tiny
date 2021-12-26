@@ -55,7 +55,7 @@ distil.add_argument('--student_name', type=str)
 distil.add_argument('--project_to', choices=['teacher', 'student', 'intermediate', None], default=None)
 distil.add_argument('--intermediate_dim', type=int)
 distil.add_argument('--projection_strategy', choices=['last', 'skip', 'average', 'average_by_layers', 'select_by_ids'], default='average_by_layers')
-distil.add_argument('--t_s_layer_ids', type=json.loads)
+distil.add_argument('--t_s_layers_ids', type=json.loads)
 
 kl_options = distil.add_argument_group('kl options')
 kl_options.add_argument('--alpha_kl', type=float, default=0.0)
@@ -112,6 +112,7 @@ with open(args.wandb_config) as f:
 os.environ['WANDB_API_KEY'] = args.wandb_config['WANDB_API_KEY']
 os.environ['WANDB_DIR'] = args.wandb_config['WANDB_DIR']
 os.makedirs(os.environ['WANDB_DIR'], exist_ok=True)
+os.makedirs(args.dumps_dir, exist_ok=True)
 os.environ['WANDB_ENTITY'] = args.wandb_config['WANDB_ENTITY']
 os.environ['WANDB_MODE'] = args.wandb_config['WANDB_MODE']
 
