@@ -321,8 +321,8 @@ class Distiller(object):
     def test(self):
         self.teacher.eval()
         self.student.eval()
-        
-        best_model = torch.load(self.params.dumps_dir, 'best_model.pth')
+
+        best_model = torch.load(os.path.join(self.params.dumps_dir, 'best_model.pth'))
         self.student.load_state_dict(best_model)
 
         logger.info(f"--- Testing...")
