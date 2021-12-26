@@ -1,0 +1,6 @@
+WANDB_API_KEY: ""
+WANDB_DIR: "/home/ayeffkay/glue_wandb_logs"
+WANDB_ENTITY: "ayeffkay"
+WANDB_MODE: "offline"
+reinit: True
+project: "glue"

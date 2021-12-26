@@ -1,0 +1,8 @@
+mode: 'min'
+factor: 2e-1
+patience: 2
+threshold: 1e-2
+threshold_mode: 'abs'
+cooldown: 2
+min_lr: 1e-7
+

@@ -657,7 +657,7 @@ class Distiller:
             self.optimizer.step()
             self.optimizer.zero_grad()
 
-            if hasattr(self.params, 'c'):
+            if self.params.hidden_distil_type == 'hyperbolic':
                 if self.params.adjust_c == 'train_exp_map_teacher':
                     self.c = self.teacher_to_poincare.c
                 elif self.params.adjust_c == 'train_exp_map_student':
@@ -871,7 +871,7 @@ class Distiller:
         self.n_valid_iter_epoch = 0
 
         # recompute from student anyway, as teacher is frozen
-        if hasattr(self, 'recompute_c') and self.recompute_c:
+        if self.params.hidden_distil_type == 'hyperbolic' and self.params.adjust_c == 'recompute_after_epoch':
             if self.params.align_hiddens == 'reduce':
                 s_ids, s_lengths = 't2s_ids', 't2s_lengths'
             else:
