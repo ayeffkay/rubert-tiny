@@ -34,7 +34,7 @@ class Distiller(object):
         self.metric_name = ''
         self.train_metric_value = 0
         self.valid_metric_value = 0
-        self.best_valid_metric_value = sys.maxsize
+        self.best_valid_metric_value = 0
         self.summary_table = wandb.Table(columns=['Task', 'Metric', 'Validation score', 'Test score'])
 
         # TODO: load data using different tokenizers (now we assume that vocabularies match)
