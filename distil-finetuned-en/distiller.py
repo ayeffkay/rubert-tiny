@@ -34,7 +34,7 @@ class Distiller(object):
         self.metric_name = ''
         self.train_metric_value = 0
         self.valid_metric_value = 0
-        self.best_valid_metric_value = sys.maxsize
+        self.best_valid_metric_value = 0
         self.summary_table = wandb.Table(columns=['Task', 'Metric', 'Validation score', 'Test score'])
 
         # TODO: load data using different tokenizers (now we assume that vocabularies match)
@@ -327,7 +327,7 @@ class Distiller(object):
         logger.info(f"--- Testing...")
         iter_bar = tqdm(self.test_loader, desc="-Iter")
         for batch in iter_bar:
-            input_batch = {name: value.to(f'cuda:{self.gpu_id}') for name, value in batch.items() if name in self.teacher.__code__.co_varnames}
+            input_batch = {name: value.to(f'cuda:{self.gpu_id}') for name, value in batch.items() if name in self.teacher.forward.__code__.co_varnames}
             input_batch['grad_on'] = False
             input_batch['is_predict_step'] = True
             self.step(**input_batch)

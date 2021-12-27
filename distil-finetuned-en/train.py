@@ -5,6 +5,7 @@ import json
 import ruamel.yaml as yaml
 import os
 import wandb
+import shutil
 
 
 parser = ArgumentParser()
@@ -104,11 +105,16 @@ hyplinear.add_argument('--use_bias', action='store_false')
 
 args, _ = parser.parse_known_args()
 
+if os.path.exists(args.dumps_dir):
+    shutil.rmtree(args.dumps_dir)
+
+
 if args.padding == 'false':
     args.padding = False
 
 with open(args.wandb_config) as f:
     args.wandb_config = yaml.load(f)
+os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu_id)
 os.environ['WANDB_API_KEY'] = args.wandb_config['WANDB_API_KEY']
 os.environ['WANDB_DIR'] = args.wandb_config['WANDB_DIR']
 os.makedirs(os.environ['WANDB_DIR'], exist_ok=True)

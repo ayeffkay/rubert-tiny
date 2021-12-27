@@ -158,7 +158,7 @@ class StudentTrainer(object):
         logger.info(f"--- Testing...")
         iter_bar = tqdm(self.test_loader, desc="-Iter")
         for batch in iter_bar:
-            input_batch = {name: value.to(f'cuda:{self.gpu_id}') for name, value in batch.items() if name in self.student.__code__.co_varnames}
+            input_batch = {name: value.to(f'cuda:{self.gpu_id}') for name, value in batch.items() if name in self.student.forward.__code__.co_varnames}
             input_batch['grad_on'] = False
             input_batch['is_predict_step'] = True
             self.step(**input_batch)
