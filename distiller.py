@@ -126,7 +126,7 @@ class Distiller:
                 self.student,
                 device_ids=[params.local_rank],
                 output_device=params.local_rank,
-                find_unused_parameters=True,
+                find_unused_parameters=True
             )
 
         self.is_master = params.is_master
@@ -219,7 +219,7 @@ class Distiller:
         self.s_hid_dim = student.config.hidden_size
         self.t_hid_dim = teacher.config.hidden_size
 
-        self.do_hyperbolic_mapping_in_step = True 
+        self.do_hyperbolic_mapping_in_step = False
         if self.alpha_contrastive > 0.0:
             self.last_loss_contrastive = 0
             self.last_valid_loss_contrastive_epoch = 0
@@ -291,8 +291,9 @@ class Distiller:
                 self.similarity_metric = custom_step.cosine_similarity
 
 
-            if params.hidden_distil_type is None or (params.hidden_distil_type == 'hyperbolic' and not params.use_hyperbolic_projections):
-                self.do_hyperbolic_mapping_in_step = True
+            if params.hidden_distil_type is None or params.hidden_distil_type == 'hyperbolic' and not params.use_hyperbolic_projections:
+                if params.hidden_distil_type == 'hyperbolic' and not params.use_hyperbolic_projections:
+                    self.do_hyperbolic_mapping_in_step = True
                 if params.project_to == 'teacher':
                     self.hid_projectors_contrastive_teacher = None
                     self.hid_projectors_contrastive_student = nn.ModuleList([nn.Linear(self.s_hid_dim, self.t_hid_dim).to(f'cuda:{self.params.local_rank}') for _ in range(layers_ct)])
@@ -302,7 +303,7 @@ class Distiller:
                 else:
                     self.hid_projectors_contrastive_student = nn.ModuleList([nn.Linear(self.s_hid_dim, params.intermediate_dim).to(f'cuda:{self.params.local_rank}') for _ in range(layers_ct)])
                     self.hid_projectors_contrastive_teacher = nn.ModuleList([nn.Linear(self.t_hid_dim, params.intermediate_dim).to(f'cuda:{self.params.local_rank}') for _ in range(layers_ct)])
- 
+
 
     @staticmethod
     def generate_padding_mask(seq_len, lengths):
@@ -457,128 +458,126 @@ class Distiller:
             s_out = self.student(input_ids=s_ids, attention_mask=s_attn_mask)
             s_logits = s_out.logits
 
-        loss = 0.0
-        if self.params.t2s_mapping is not None:
-            with torch.set_grad_enabled(grad_on):
+            loss = 0.0
+            if self.params.t2s_mapping is not None:
                 t2s_out = self.student(input_ids=t2s_ids,
-                                       attention_mask=t2s_attn_mask)
-            t2s_logits = t2s_out.logits
-            if self.params.t2s_vocab_padded is not None:
-                student_mapped_logits = custom_step.map_step(t2s_logits,
-                                                             student_split_ids, self.params.student_tok_ids['pad_token'],
-                                                             t2s_vocab_padded=self.params.t2s_vocab_padded,
-                                                             s2t_vocab_padded=self.params.s2t_vocab_padded,
-                                                             s2t_idxs_padded=self.params.s2t_idxs_padded,
-                                                             sum_probs=self.params.sum_probs)
-                student_mapped_logits = custom_step.masked_select_reshape_2d(student_mapped_logits, t_attn_mask, self.teacher_vocab_size)
-                teacher_mapped_logits = custom_step.masked_select_reshape_2d(t_logits, t_attn_mask, self.teacher_vocab_size)
-                if self.params.t2s_mapped_ids is not None:
-                    student_mapped_logits = student_mapped_logits[:, self.params.t2s_mapped_ids]
-                    teacher_mapped_logits = teacher_mapped_logits[:, self.params.t2s_mapped_ids]
+                                        attention_mask=t2s_attn_mask)
+                t2s_logits = t2s_out.logits
+                if self.params.t2s_vocab_padded is not None:
+                    student_mapped_logits = custom_step.map_step(t2s_logits,
+                                                                student_split_ids, self.params.student_tok_ids['pad_token'],
+                                                                t2s_vocab_padded=self.params.t2s_vocab_padded,
+                                                                s2t_vocab_padded=self.params.s2t_vocab_padded,
+                                                                s2t_idxs_padded=self.params.s2t_idxs_padded,
+                                                                sum_probs=self.params.sum_probs)
+                    student_mapped_logits = custom_step.masked_select_reshape_2d(student_mapped_logits, t_attn_mask, self.teacher_vocab_size)
+                    teacher_mapped_logits = custom_step.masked_select_reshape_2d(t_logits, t_attn_mask, self.teacher_vocab_size)
+                    if self.params.t2s_mapped_ids is not None:
+                        student_mapped_logits = student_mapped_logits[:, self.params.t2s_mapped_ids]
+                        teacher_mapped_logits = teacher_mapped_logits[:, self.params.t2s_mapped_ids]
 
+                    if self.alpha_ce > 0.0:
+                        loss_ce = custom_step.ce_step(student_mapped_logits, teacher_mapped_logits, self.ce_loss_fct, self.temperature)
+            # reduce-map was skipped
+            if self.params.matching_ids is not None and self.params.t2s_vocab_padded is None:
+                # use only logits for teacher tokens which could be represented by student tokens
+                # PAD -> PAD, UNK -> UNK, CLS -> CLS, unused1 -> skip, unused2 -> skip, ...
                 if self.alpha_ce > 0.0:
-                    loss_ce = custom_step.ce_step(student_mapped_logits, teacher_mapped_logits, self.ce_loss_fct, self.temperature)
-        # reduce-map was skipped
-        if self.params.matching_ids is not None and self.params.t2s_vocab_padded is None:
-            # use only logits for teacher tokens which could be represented by student tokens
-            # PAD -> PAD, UNK -> UNK, CLS -> CLS, unused1 -> skip, unused2 -> skip, ...
-            student_mapped_logits = custom_step.match_step(s_logits, student_mask, 1, self.params.student_matched)
-            teacher_mapped_logits = custom_step.match_step(t_logits, teacher_mask, 1, self.params.teacher_matched)
+                    student_mapped_logits = custom_step.match_step(s_logits, student_mask, 1, self.params.student_matched)
+                    teacher_mapped_logits = custom_step.match_step(t_logits, teacher_mask, 1, self.params.teacher_matched)
 
-            if self.alpha_ce > 0.0:
-                loss_ce = custom_step.ce_step(student_mapped_logits, teacher_mapped_logits, 
-                                              self.ce_loss_fct, self.temperature)
+                    loss_ce = custom_step.ce_step(student_mapped_logits, teacher_mapped_logits, 
+                                                self.ce_loss_fct, self.temperature)
 
-        if (self.alpha_contrastive > 0.0 and self.params.hidden_distil_type == 'hyperbolic' and 
-            self.params.use_hyperbolic_projections):
+            if (self.alpha_contrastive > 0.0 and self.params.hidden_distil_type == 'hyperbolic' and 
+                self.params.use_hyperbolic_projections):
 
-                t_hiddens = [self.teacher_to_poincare(t, c=self.c) for t in t_out.hidden_states]
+                    t_hiddens = [self.teacher_to_poincare(t, c=self.c) for t in t_out.hidden_states]
+                    if self.params.align_hiddens == 'reduce':
+                        s_hiddens = [self.student_to_poincare(s, c=self.c) for s in t2s_out.hidden_states]
+                    else:
+                        s_hiddens = [self.student_to_poincare(s, c=self.c) for s in s_out.hidden_states]
+                
+            elif self.alpha_mse + self.alpha_contrastive > 0.0:
+                t_hiddens = t_out.hidden_states
                 if self.params.align_hiddens == 'reduce':
-                    s_hiddens = [self.student_to_poincare(s, c=self.c) for s in t2s_out.hidden_states]
+                    s_hiddens = t2s_out.hidden_states
                 else:
-                    s_hiddens = [self.student_to_poincare(s, c=self.c) for s in s_out.hidden_states]
-            
-        else:
-            t_hiddens = t_out.hidden_states
-            if self.params.align_hiddens == 'reduce':
-                s_hiddens = t2s_out.hidden_states
-            else:
-                s_hiddens = s_out.hidden_states
+                    s_hiddens = s_out.hidden_states
 
-        # match strategy, use s outputs
-        if self.params.align_hiddens == 'match' and self.params.matching_ids is not None:
-            if self.alpha_mse > 0.0:
+            # match strategy, use s outputs
+            if self.params.align_hiddens == 'match' and self.params.matching_ids is not None:
+                if self.alpha_mse > 0.0:
+                    loss_mse = custom_step.mse_step(self.hid_projectors_mse_student, 
+                                                    self.hid_projectors_mse_teacher, 
+                                                    self.mse_loss_fct, 
+                                                    s_hiddens, t_hiddens,
+                                                    student_mask, teacher_mask, 
+                                                    1, self.params.projection_strategy, 
+                                                    t_s_layers_ids=self.params.t_s_layers_ids)
+                if self.alpha_contrastive > 0.0:
+                    loss_contrastive = custom_step.contrastive_step(self.params.train_cardinality, 
+                                                                    self.hid_projectors_contrastive_student,
+                                                                    self.hid_projectors_contrastive_teacher, 
+                                                                    s_hiddens, t_hiddens, student_mask, teacher_mask, 
+                                                                    0, 1, self.params.projection_strategy,
+                                                                    negative_sampling_strategy=self.params.negative_sampling_strategy,
+                                                                    use_mismatched_ids=self.params.use_mismatched_ids,
+                                                                    n_negative_samples=self.params.n_negative_samples,
+                                                                    teacher_student_prop=self.params.teacher_student_prop,
+                                                                    temperature=self.temperature,
+                                                                    from_one_sample=self.params.from_one_sample,
+                                                                    add_neg_size_constant=self.params.add_neg_size_constant, 
+                                                                    t_s_layers_ids=self.params.t_s_layers_ids, 
+                                                                    similarity_metric=self.similarity_metric, 
+                                                                    use_hyp_mapping_in_step=self.do_hyperbolic_mapping_in_step, 
+                                                                    c=self.c if hasattr(self, 'c') else None, 
+                                                                    teacher_to_poincare=self.teacher_to_poincare if hasattr(self, 'teacher_to_poincare') else None, 
+                                                                    student_to_poincare=self.student_to_poincare if hasattr(self, 'student_to_poincare') else None)
 
-                loss_mse = custom_step.mse_step(self.hid_projectors_mse_student, 
-                                                self.hid_projectors_mse_teacher, 
-                                                self.mse_loss_fct, 
-                                                s_hiddens, t_hiddens,
-                                                student_mask, teacher_mask, 
-                                                1, self.params.projection_strategy, 
-                                                t_s_layers_ids=self.params.t_s_layers_ids)
-            if self.alpha_contrastive > 0.0:
-                loss_contrastive = custom_step.contrastive_step(self.params.train_cardinality, 
-                                                                self.hid_projectors_contrastive_student,
-                                                                self.hid_projectors_contrastive_teacher, 
-                                                                s_hiddens, t_hiddens, student_mask, teacher_mask, 
-                                                                0, 1, self.params.projection_strategy,
-                                                                negative_sampling_strategy=self.params.negative_sampling_strategy,
-                                                                use_mismatched_ids=self.params.use_mismatched_ids,
-                                                                n_negative_samples=self.params.n_negative_samples,
-                                                                teacher_student_prop=self.params.teacher_student_prop,
-                                                                temperature=self.temperature,
-                                                                from_one_sample=self.params.from_one_sample,
-                                                                add_neg_size_constant=self.params.add_neg_size_constant, 
-                                                                t_s_layers_ids=self.params.t_s_layers_ids, 
-                                                                similarity_metric=self.similarity_metric, 
-                                                                use_hyp_mapping_in_step=self.do_hyperbolic_mapping_in_step, 
-                                                                c=self.c if hasattr(self, 'c') else None, 
-                                                                teacher_to_poincare=self.teacher_to_poincare if hasattr(self, 'teacher_to_poincare') else None, 
-                                                                student_to_poincare=self.student_to_poincare if hasattr(self, 'student_to_poincare') else None)
-
-        # reduce strategy, use t2s hiddens and t2s mapping
-        elif self.params.align_hiddens == 'reduce' and self.params.t2s_mapping is not None:
-            if self.alpha_mse > 0.0:
-                loss_mse = custom_step.mse_step(self.hid_projectors_mse_student, 
-                                                self.hid_projectors_mse_teacher, 
-                                                self.mse_loss_fct,
-                                                s_hiddens, t_hiddens,
-                                                t_attn_mask, t_attn_mask, 1,
-                                                self.params.projection_strategy,
-                                                student_split_ids, self.params.student_tok_ids['pad_token'], 
-                                                t_s_layers_ids=self.params.t_s_layers_ids)
-            if self.alpha_contrastive > 0.0:
-                loss_contrastive = custom_step.contrastive_step(self.params.train_cardinality,
-                                                                self.hid_projectors_contrastive_student, 
-                                                                self.hid_projectors_contrastive_teacher, 
-                                                                s_hiddens, t_hiddens,
-                                                                t_attn_mask, t_attn_mask, 0, 1,
-                                                                self.params.projection_strategy,
-                                                                student_split_ids,
-                                                                self.params.student_tok_ids['pad_token'],
-                                                                self.params.negative_sampling_strategy,
-                                                                self.params.use_mismatched_ids,
-                                                                self.params.n_negative_samples,
-                                                                self.params.teacher_student_prop,
-                                                                self.temperature, self.params.from_one_sample,
-                                                                self.params.add_neg_size_constant, 
-                                                                t_s_layers_ids=self.params.t_s_layers_ids, 
-                                                                similarity_metric=self.similarity_metric, 
-                                                                use_hyp_mapping_in_step=self.do_hyperbolic_mapping_in_step, 
-                                                                c=self.c if hasattr(self, 'c') else None, 
-                                                                teacher_to_poincare=self.teacher_to_poincare if hasattr(self, 'teacher_to_poincare') else None, 
-                                                                student_to_poincare=self.student_to_poincare if hasattr(self, 'student_to_poincare') else None)
-        # no alignment strategy for hiddens specified
-        elif self.params.align_hiddens is None and self.params.matching_ids is not None:
-            if self.alpha_contrastive > 0.0:
-                # TODO: correct for hyperbolic layers
-                loss_contrastive = custom_step.contrastive_step_v0(self.params.train_cardinality,
-                                                                   self.hid_projectors_contrastive_student, 
-                                                                   s_hiddens, t_hiddens,
-                                                                   student_mask, teacher_mask, 0, 1,
-                                                                   self.params.projection_strategy,
-                                                                   self.params.student_tok_ids['pad_token'],
-                                                                   self.params.add_neg_size_constant)
+            # reduce strategy, use t2s hiddens and t2s mapping
+            elif self.params.align_hiddens == 'reduce' and self.params.t2s_mapping is not None:
+                if self.alpha_mse > 0.0:
+                    loss_mse = custom_step.mse_step(self.hid_projectors_mse_student, 
+                                                    self.hid_projectors_mse_teacher, 
+                                                    self.mse_loss_fct,
+                                                    s_hiddens, t_hiddens,
+                                                    t_attn_mask, t_attn_mask, 1,
+                                                    self.params.projection_strategy,
+                                                    student_split_ids, self.params.student_tok_ids['pad_token'], 
+                                                    t_s_layers_ids=self.params.t_s_layers_ids)
+                if self.alpha_contrastive > 0.0:
+                    loss_contrastive = custom_step.contrastive_step(self.params.train_cardinality,
+                                                                    self.hid_projectors_contrastive_student, 
+                                                                    self.hid_projectors_contrastive_teacher, 
+                                                                    s_hiddens, t_hiddens,
+                                                                    t_attn_mask, t_attn_mask, 0, 1,
+                                                                    self.params.projection_strategy,
+                                                                    student_split_ids,
+                                                                    self.params.student_tok_ids['pad_token'],
+                                                                    self.params.negative_sampling_strategy,
+                                                                    self.params.use_mismatched_ids,
+                                                                    self.params.n_negative_samples,
+                                                                    self.params.teacher_student_prop,
+                                                                    self.temperature, self.params.from_one_sample,
+                                                                    self.params.add_neg_size_constant, 
+                                                                    t_s_layers_ids=self.params.t_s_layers_ids, 
+                                                                    similarity_metric=self.similarity_metric, 
+                                                                    use_hyp_mapping_in_step=self.do_hyperbolic_mapping_in_step, 
+                                                                    c=self.c if hasattr(self, 'c') else None, 
+                                                                    teacher_to_poincare=self.teacher_to_poincare if hasattr(self, 'teacher_to_poincare') else None, 
+                                                                    student_to_poincare=self.student_to_poincare if hasattr(self, 'student_to_poincare') else None)
+            # no alignment strategy for hiddens specified
+            elif self.params.align_hiddens is None and self.params.matching_ids is not None:
+                if self.alpha_contrastive > 0.0:
+                    # TODO: correct for hyperbolic layers
+                    loss_contrastive = custom_step.contrastive_step_v0(self.params.train_cardinality,
+                                                                    self.hid_projectors_contrastive_student, 
+                                                                    s_hiddens, t_hiddens,
+                                                                    student_mask, teacher_mask, 0, 1,
+                                                                    self.params.projection_strategy,
+                                                                    self.params.student_tok_ids['pad_token'],
+                                                                    self.params.add_neg_size_constant)
 
         loss = 0.
         with torch.set_grad_enabled(grad_on):
@@ -655,6 +654,15 @@ class Distiller:
         if self.n_train_iter_epoch % self.params.gradient_accumulation_steps == 0:
             torch.nn.utils.clip_grad_norm_(self.student.parameters(), self.params.max_grad_norm)
             self.optimizer.step()
+            """
+            if self.is_master:
+                for layer in self.hid_projectors_contrastive_student:
+                    for p in layer.parameters():
+                        print(p.data, p.grad)
+                        break
+                    break
+            """
+            
             self.optimizer.zero_grad()
 
             if self.params.hidden_distil_type == 'hyperbolic':
