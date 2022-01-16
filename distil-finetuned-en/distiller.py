@@ -347,6 +347,7 @@ class Distiller(object):
         self.student.load_state_dict(best_model)
 
         logger.info(f"--- Testing...")
+
         test_metric = datasets.load_metric('glue', self.params.glue_dataset)
         for batch in self.test_loader:
             input_batch = {name: value.to(f'cuda:{self.gpu_id}') for name, value in batch.items() if name in self.teacher.forward.__code__.co_varnames}

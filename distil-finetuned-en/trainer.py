@@ -161,6 +161,7 @@ class StudentTrainer(object):
         self.student.load_state_dict(best_model)
 
         logger.info(f"--- Testing...")
+
         test_metric = datasets.load_metric('glue', self.params.glue_dataset)
         for batch in self.test_loader:
             input_batch = {name: value.to(f'cuda:{self.gpu_id}') for name, value in batch.items() if name in self.student.forward.__code__.co_varnames}
@@ -208,7 +209,7 @@ class StudentTrainer(object):
 
             if (self.lr_drop_ct == self.lr_drop_patience and 
                 self.optimizer.param_groups[0]['lr'] > self.params.min_lr): 
-                
+
                 self.optimizer.param_groups[0]['lr'] /= self.lr_drop_div
                 self.lr_drop_ct = 0
             

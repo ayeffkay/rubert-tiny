@@ -11,7 +11,7 @@ python train.py --glue_dataset cola \
                 --lr 1e-03 \
                 --scheduler ReduceLROnPlateau \
                 --scheduler_params scripts/scheduler.yaml \
-                --gpu_id 9 \
+                --gpu_id 0 \
                 --alpha_ce 0.5 \
                 --seed 42 \
                 --dumps_dir cola_hyperbolic_baseline \

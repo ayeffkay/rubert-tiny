@@ -111,8 +111,13 @@ hyplinear.add_argument('--use_bias', action='store_false')
 
 args, _ = parser.parse_known_args()
 
+
+if os.path.exists(args.dumps_dir):
+    shutil.rmtree(args.dumps_dir)
+
 with open(args.wandb_config) as f:
     args.wandb_config = yaml.load(f)
+os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu_id)
 os.environ['WANDB_API_KEY'] = args.wandb_config['WANDB_API_KEY']
 os.environ['WANDB_DIR'] = args.wandb_config['WANDB_DIR']
 if os.path.exists(args.dumps_dir):
