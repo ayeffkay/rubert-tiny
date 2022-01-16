@@ -5,6 +5,7 @@ import json
 import ruamel.yaml as yaml
 import os
 import wandb
+import shutil
 
 
 parser = ArgumentParser()
@@ -13,17 +14,21 @@ parser.add_argument('--glue_dataset', choices=['cola', 'sst2', 'mrpc',
                                                'qnli', 'rte', 'wnli'])
 
 tokenizer_group = parser.add_argument_group('tokenizer group')
-tokenizer_group.add_argument('--padding', choices=['false', 'longest', 'max_len'], default='false')
-tokenizer_group.add_argument('--truncation', choices=['longest_first', 'only_first', 'only_second', False], default='longest_first')
-tokenizer_group.add_argument('--add_special_tokens', action='store_false')
 tokenizer_group.add_argument('--tokenizer_name')
+tokenizer_group.add_argument('--tokenizer_params', help="""yaml file with tokenizer params""")
 
 training_options = parser.add_argument_group('training_options')
 training_options.add_argument('--batch_size', type=int, default=4)
 training_options.add_argument('--n_epochs', type=int, default=1)
 training_options.add_argument('--lr', type=float, default=1e-3)
-training_options.add_argument('--scheduler', type=str, help="""Scheduler name from torch.optim.lr_scheduler""")
+
+"""
+training_options.add_argument('--scheduler', type=str)
 training_options.add_argument('--scheduler_params')
+"""
+
+training_options.add_argument('--val_every_n_batches', type=int, default=1)
+training_options.add_argument('--val_after_epoch', action='store_true')
 
 training_options.add_argument('--gpu_id', type=int, default=0)
 training_options.add_argument('--alpha_ce', type=float, default=1.0)
@@ -33,6 +38,10 @@ training_options.add_argument('--log_name', type=str)
 training_options.add_argument('--dumps_dir', type=str)
 
 training_options.add_argument('--valid_prop', type=float, default=0.1)
+training_options.add_argument('--valid_patience', type=int, default=1)
+training_options.add_argument('--lr_drop_patience', type=int, default=1)
+training_options.add_argument('--lr_drop_div', type=float, default=2)
+training_options.add_argument('--min_lr', type=float, default=1e-10)
 
 wandb_options = parser.add_argument_group('wandb options')
 wandb_options.add_argument('--wandb_config', help='.yaml file with project name, run name, mode, etc.')
@@ -40,12 +49,10 @@ wandb_options.add_argument('--run_id')
 
 subparsers = parser.add_subparsers(help="""Running mode""", dest='mode')
 
-train_teacher = subparsers.add_parser('train_teacher')
-train_teacher.add_argument('teacher_name')
-
 
 train_student = subparsers.add_parser('train_student')
 train_student.add_argument('--student_name')
+train_student.add_argument('--from_pretrained', action='store_true')
 
 distil = subparsers.add_parser('distil_teacher')
 distil.add_argument('--teacher_name', type=str)
@@ -104,13 +111,12 @@ hyplinear.add_argument('--use_bias', action='store_false')
 
 args, _ = parser.parse_known_args()
 
-if args.padding == 'false':
-    args.padding = False
-
 with open(args.wandb_config) as f:
     args.wandb_config = yaml.load(f)
 os.environ['WANDB_API_KEY'] = args.wandb_config['WANDB_API_KEY']
 os.environ['WANDB_DIR'] = args.wandb_config['WANDB_DIR']
+if os.path.exists(args.dumps_dir):
+    shutil.rmtree(args.dumps_dir)
 os.makedirs(os.environ['WANDB_DIR'], exist_ok=True)
 os.makedirs(args.dumps_dir, exist_ok=True)
 os.environ['WANDB_ENTITY'] = args.wandb_config['WANDB_ENTITY']
@@ -122,9 +128,13 @@ args.run = wandb.init(reinit=args.wandb_config['reinit'],
                       id=args.run_id, 
                       project=args.wandb_config['project'], 
                       config=config)
-
+"""
 with open(args.scheduler_params) as f:
     args.scheduler_params = yaml.load(f)
+"""
+
+with open(args.tokenizer_params) as f:
+    args.tokenizer_params = yaml.load(f)
 
 if 'train' in args.mode:
     trainer = StudentTrainer(args)

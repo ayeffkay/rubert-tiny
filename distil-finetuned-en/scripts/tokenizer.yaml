@@ -1,0 +1,4 @@
+add_special_tokens: True
+padding: "max_length"
+max_length: 64
+truncation: "longest_first"

@@ -2,25 +2,25 @@
 
 pkill -f train.py
 
-python train.py --glue_dataset cola \
-                --padding false \
-                --truncation longest_first \
+python train.py --glue_dataset sst2 \
                 --tokenizer_name bert-base-uncased \
+                --tokenizer_params scripts/tokenizer.yaml \
                 --batch_size 128 \
-                --n_epochs 256 \
-                --lr 1e-03 \
-                --scheduler ReduceLROnPlateau \
-                --scheduler_params scripts/scheduler.yaml \
+                --lr 4e-05 \
+                --val_every_n_batches 250 \
+                --valid_patience 10 \
+                --lr_drop_patience 3 \
+                --lr_drop_div 2.0 \
                 --gpu_id 0 \
-                --alpha_ce 0.5 \
                 --seed 42 \
-                --dumps_dir cola_baseline \
+                --dumps_dir sst2_baseline \
                 --valid_prop 0.1 \
                 --wandb_config scripts/wandb_config.yaml \
-                --run_id cola_baseline_distil \
+                --run_id sst2_baseline_distil \
+                --alpha_ce 0.5 \
                 distil_teacher --teacher_name bert-base-uncased \
-                --teacher_weights glue_cola_torch_uncased_bert/model.pth.tar \
+                --teacher_weights teacher_cola/best_model.pth \
                 --student_name distilbert-tiny-uncased \
-                --alpha_kl 1.0 --temperature 2
+                --alpha_kl 2.0 --temperature 2
 
 

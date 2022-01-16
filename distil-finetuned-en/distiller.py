@@ -1,13 +1,16 @@
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
-from transformers import AutoConfig, AutoModelForSequenceClassification
+from torch.utils.data import DataLoader, RandomSampler
+from transformers import AutoConfig, AutoTokenizer, AutoModelForSequenceClassification
 from transformers.optimization import AdamW
 from tqdm import tqdm
+from copy import deepcopy
+from progressbar import ProgressBar
 
 import load_data
 import delta_
 import os
+import json
 
 import sys
 sys.path.insert(1, '../')
@@ -25,33 +28,40 @@ class Distiller(object):
     def __init__(self, params):
         self.params = params
         self.run = params.run
-        self.run.define_metric('epoch')
-        self.run.define_metric('train/*', step_metric='epoch')
-        self.run.define_metric('valid/*', step_metric='epoch')
-        self.run.define_metric('valid/loss_epoch', step_metric='epoch', mode='min')
+        
+        self.run.define_metric('step')
+        self.run.define_metric('batch/*', step_metric='step')
+        self.run.define_metric('train/*', step_metric='step')
+        self.run.define_metric('valid/*', step_metric='step')
 
-        self.main_metric = datasets.load_metric('glue', params.glue_dataset)
         self.metric_name = ''
         self.train_metric_value = 0
         self.valid_metric_value = 0
-        self.best_valid_metric_value = sys.maxsize
+        self.best_valid_metric_value = 0
+
+        self.lr_drop_patience = params.lr_drop_patience
+        self.lr_drop_div = params.lr_drop_div
+        self.valid_patience = params.valid_patience
+        self.val_every_n_batches = params.val_every_n_batches
+        self.end_train_flag = False
+
         self.summary_table = wandb.Table(columns=['Task', 'Metric', 'Validation score', 'Test score'])
 
         # TODO: load data using different tokenizers (now we assume that vocabularies match)
-        train_data = load_data.load_glue_dataset(params.glue_dataset, 
-                                                            params.tokenizer_name, 
-                                                            params.padding, 
-                                                            params.truncation, 
-                                                            'train', 0, 
-                                                            params.seed)
-        valid_data = load_data.load_glue_dataset(params.glue_dataset, 
-                                                params.tokenizer_name, 
-                                                params.padding, 
-                                                params.truncation, 
+        tokenizer = AutoTokenizer.from_pretrained(params.tokenizer_name)
+        train_data, _ = load_data.load_glue_dataset(params.glue_dataset, 
+                                                 tokenizer, 
+                                                 params.tokenizer_params, 
+                                                 'train')
+        valid_data, _ = load_data.load_glue_dataset(params.glue_dataset, 
+                                                 tokenizer, 
+                                                 params.tokenizer_params, 
                                                 'validation')
-        self.train_loader = DataLoader(train_data, params.batch_size, shuffle=True, collate_fn=load_data.collate_fn)
-        self.valid_loader = DataLoader(valid_data, params.batch_size, shuffle=False, collate_fn=load_data.collate_fn)
-        self.test_loader = DataLoader(valid_data, params.batch_size, shuffle=False, collate_fn=load_data.collate_fn)
+        self.train_loader = DataLoader(train_data, params.batch_size, shuffle=True)
+        self.valid_loader = DataLoader(valid_data, params.batch_size, shuffle=False)
+        self.test_loader = DataLoader(valid_data, params.batch_size, shuffle=False)
+        if params.val_after_epoch:
+            self.val_every_n_batches = len(self.train_loader)
 
         self.gpu_id = params.gpu_id
         self.n_classes = train_data.features['labels'].num_classes
@@ -59,17 +69,19 @@ class Distiller(object):
         self.student = AutoModelForSequenceClassification.from_config(config).to(f'cuda:{self.gpu_id}')
         self.teacher = AutoModelForSequenceClassification.from_pretrained(params.teacher_name, num_labels=self.n_classes, output_hidden_states=True, return_dict=True).to(f'cuda:{self.gpu_id}')
         if params.teacher_weights is not None:
-            state_dict = torch.load(params.teacher_weights)['model_state_dict']
+            state_dict = torch.load(params.teacher_weights, map_location=torch.device(f'cuda:{self.gpu_id}'))
+            if 'model_state_dict' in state_dict:
+                state_dict = state_dict['model_state_dict']
             self.teacher.load_state_dict(state_dict)
 
         self.optimizer = AdamW(self.student.parameters(), lr=params.lr)
-        self.scheduler = getattr(torch.optim.lr_scheduler, params.scheduler)(self.optimizer, **params.scheduler_params)
+        #self.scheduler = getattr(torch.optim.lr_scheduler, params.scheduler)(self.optimizer, **params.scheduler_params, verbose=True)
 
-        if self.params.train_temperature:
-            self.temperature = nn.Parameter(torch.tensor([self.params.temperature]))
+        if params.train_temperature:
+            self.temperature = nn.Parameter(torch.tensor([params.temperature]))
             self.optimizer.add_param_group({"params": [self.temperature]})
         else:
-            self.temperature = self.params.temperature
+            self.temperature = params.temperature
 
         self.alpha_ce = params.alpha_ce
         self.alpha_kl = params.alpha_kl
@@ -81,19 +93,22 @@ class Distiller(object):
 
         if self.alpha_ce > 0.0:
             self.ce_loss = nn.CrossEntropyLoss(reduction='sum')
-            self.train_loss_ce_epoch = 0.
-            self.valid_loss_ce_epoch = 0.
+            self.train_loss_ce_step = 0.
+            self.train_loss_ce_batch = 0.
+            self.valid_loss_ce_step = 0.
 
         if self.alpha_kl > 0.0:
             self.kl_loss = nn.KLDivLoss(reduction='sum')
-            self.train_loss_kl_epoch = 0.
-            self.valid_loss_kl_epoch = 0.
+            self.train_loss_kl_step = 0.
+            self.valid_loss_kl_step = 0.
         
         layers_ct = 4 if self.params.projection_strategy in ['last', 'skip', 'average'] else 1
         if self.alpha_mse > 0.0:
             self.mse_loss = nn.MSELoss(reduction='sum')
-            self.train_loss_mse_epoch = 0.
-            self.valid_loss_mse_epoch = 0.
+            self.train_loss_mse_step = 0.
+            self.train_loss_mse_batch = 0.
+            self.valid_loss_mse_step = 0.
+
             if params.project_to == 'teacher':
                 self.hid_projectors_mse_teacher = None
                 self.hid_projectors_mse_student = nn.ModuleList([nn.Linear(self.s_hid_dim, self.t_hid_dim).to(f'cuda:{self.gpu_id}') for _ in range(layers_ct)])
@@ -105,8 +120,10 @@ class Distiller(object):
                 self.hid_projectors_mse_teacher = nn.ModuleList([nn.Linear(self.t_hid_dim, params.intermediate_dim).to(f'cuda:{self.gpu_id}') for _ in range(layers_ct)])
 
         if self.alpha_contrastive > 0.0:
-            self.train_loss_contrastive_epoch = 0.
-            self.valid_loss_contrastive_epoch = 0.
+            self.train_loss_contrastive_step = 0.
+            self.train_loss_contrastive_batch = 0.
+            self.valid_loss_contrastive_step = 0.
+
             if params.hidden_distil_type == 'hyperbolic':
                 self.similarity_metric = hypmath.dist
                 self.c = params.c
@@ -170,24 +187,32 @@ class Distiller(object):
                     self.hid_projectors_contrastive_student = nn.ModuleList([nn.Linear(self.s_hid_dim, params.intermediate_dim).to(f'cuda:{self.gpu_id}') for _ in range(layers_ct)])
                     self.hid_projectors_contrastive_teacher = nn.ModuleList([nn.Linear(self.t_hid_dim, params.intermediate_dim).to(f'cuda:{self.gpu_id}') for _ in range(layers_ct)])
 
-        self.epoch = 0
-        self.n_epochs = params.n_epochs
-        self.train_loss_epoch = 0.
-        self.valid_loss_epoch = 0.
-        self.best_valid_loss_epoch = sys.maxsize
+
+        self.train_loss_step = 0.
+        self.train_loss_batch = 0.
+        self.valid_loss_step = 0.
+        self.best_valid_loss_step = sys.maxsize
         self.n_train_batches_seen = 0
+        self.n_total_train_batches_seen = 0
         self.n_valid_batches_seen = 0
+
+        self.lr_drop_ct = 0
+        self.validation_patience_ct = 0
+        self.n_log_step = 0
 
 
     def step(self, input_ids, attention_mask, labels, token_type_ids=None, grad_on=True, is_predict_step=False, **kwargs):
+        self.student.train() if grad_on else self.student.eval()
+
         with torch.set_grad_enabled(grad_on):
             t_out = self.teacher(input_ids, attention_mask, token_type_ids)
             s_out = self.student(input_ids, attention_mask)
 
-            predictions = torch.max(s_out.logits, dim=1)[1]
-            self.main_metric.add_batch(predictions=predictions, references=labels)
+            with torch.no_grad():
+                predictions = torch.max(s_out.logits.detach(), dim=1)[1]
+
             if is_predict_step:
-                return 
+                return predictions
 
             loss = 0.
             if self.alpha_ce > 0.0:
@@ -203,9 +228,9 @@ class Distiller(object):
                         s_hiddens = [self.student_to_poincare(s, c=self.c) for s in s_out.hidden_states]
                     else:
                         hyp_kwargs = dict(use_hyp_mappings_in_step=True, 
-                                        c=self.c, 
-                                        student_to_poincare=self.student_to_poincare, 
-                                        teacher_to_poincare=self.teacher_to_poincare)
+                                          c=self.c, 
+                                          student_to_poincare=self.student_to_poincare, 
+                                          teacher_to_poincare=self.teacher_to_poincare)
                         t_hiddens = t_out.hidden_states
                         s_hiddens = s_out.hidden_states
 
@@ -237,107 +262,105 @@ class Distiller(object):
                 loss += self.alpha_kl * loss_kl
 
         if grad_on:
-            self.train_loss_epoch += loss.item()
+            self.train_loss_step += loss.item()
+            self.train_loss_batch = loss.item()
             if self.alpha_ce > 0.0:
-                self.train_loss_ce_epoch += loss_ce.item()
+                self.train_loss_ce_step += loss_ce.item()
+                self.train_loss_ce_batch = loss_ce.item()
             if self.alpha_kl > 0.0:
-                self.train_loss_kl_epoch += loss_kl.item()
+                self.train_loss_kl_step += loss_kl.item()
+                self.train_loss_kl_batch = loss_kl.item()
             if self.alpha_mse > 0.0:
-                self.train_loss_mse_epoch += loss_mse.item()
+                self.train_loss_mse_step += loss_mse.item()
+                self.train_loss_mse_batch = loss_mse.item()
             if self.alpha_contrastive > 0.0:
-                self.train_loss_contrastive_epoch += loss_contrastive.item()
+                self.train_loss_contrastive_step += loss_contrastive.item()
+                self.train_loss_contrastive_batch = loss_contrastive.item()
             self.optimize(loss)
         else:
-            self.valid_loss_epoch += loss.item()
+            self.valid_loss_step += loss.item()
             if self.alpha_ce > 0.0:
-                self.valid_loss_ce_epoch += loss_ce.item()
+                self.valid_loss_ce_step += loss_ce.item()
             if self.alpha_kl > 0.0:
-                self.valid_loss_kl_epoch += loss_kl.item()
+                self.valid_loss_kl_step += loss_kl.item()
             if self.alpha_mse > 0.0:
-                self.valid_loss_mse_epoch += loss_mse.item()
+                self.valid_loss_mse_step += loss_mse.item()
             if self.alpha_contrastive > 0.0:
-                self.valid_loss_contrastive_epoch += loss_contrastive.item()
+                self.valid_loss_contrastive_step += loss_contrastive.item()
+        return predictions
 
 
     def train(self):
         logger.info("Starting training")
-        self.teacher.eval()
+        torch.save(self.student.state_dict(), 'best_model.pth')
 
-        for _ in range(self.n_epochs):
-            self.student.train()
-            logger.info(f"--- Starting epoch {self.epoch}/{self.n_epochs}")
-
-            iter_bar = tqdm(self.train_loader, desc="-Iter")
-            for batch in iter_bar:
+        while True:
+            if self.end_train_flag:
+                break
+            train_metric = datasets.load_metric('glue', self.params.glue_dataset)
+            bar = ProgressBar(max_value=self.val_every_n_batches)
+            i = 0
+            for batch in self.train_loader:
                 input_batch = {name: value.to(f'cuda:{self.gpu_id}') for name, value in batch.items() if name in self.teacher.forward.__code__.co_varnames}
                 input_batch['grad_on'] = True
-                self.step(**input_batch)
+                predictions = self.step(**input_batch)
+                train_metric.add_batch(predictions=predictions, references=batch['labels'])
                 self.n_train_batches_seen += 1
-                iter_bar.update()
-                iter_bar.set_postfix(
-                    {"Avg_cum_loss": f"{self.train_loss_epoch/self.n_train_batches_seen:.2f}"}
-                )
+                self.n_total_train_batches_seen += 1
 
-            iter_bar.close()
-            logger.info(f"--- Ending epoch {self.epoch}/{self.n_epochs}")
-            
-            train_score = list(self.main_metric.compute().items())[0]
-            self.metric_name = train_score[0]
-            self.train_metric_value = train_score[1]
+                if self.n_total_train_batches_seen % self.val_every_n_batches == 0:
+                    train_res = list(train_metric.compute().items())[0]
+                    self.metric_name = train_res[0]
+                    self.train_metric_value = train_res[1]
 
-            self.validate()
-            self.end_epoch()
+                    self.validate()
+                    self.end_step()
+                    i = 0
+
+                if self.end_train_flag:
+                    break
+                i += 1
+                bar.update(i)
         
         logger.info("Training is finished.")
         logger.info("Starting testing...")
         self.test()
         logger.info("Testing is finished.")
 
-
     def validate(self):
-        self.teacher.eval()
-        self.student.eval()
-        
-        logger.info(f"--- Validating epoch {self.epoch}/{self.n_epochs}")
-        iter_bar = tqdm(self.valid_loader, desc="-Iter")
-        for batch in iter_bar:
+        logger.info(f"--- Validating step...")
+        valid_metric = datasets.load_metric('glue', self.params.glue_dataset)
+        for batch in self.valid_loader:
             input_batch = {name: value.to(f'cuda:{self.gpu_id}') for name, value in batch.items() if name in self.teacher.forward.__code__.co_varnames}
             input_batch['grad_on'] = False
-            self.step(**input_batch)
+            predictions = self.step(**input_batch)
+            valid_metric.add_batch(predictions=predictions, references=batch['labels'])
             self.n_valid_batches_seen += 1
-            iter_bar.update()
-            iter_bar.set_postfix(
-                {"Avg_cum_valid_loss": f"{self.valid_loss_epoch /self.n_valid_batches_seen:.2f}"}
-            )
-        iter_bar.close()
-        valid_score = list(self.main_metric.compute().items())[0]
-        self.metric_name = valid_score[0]
-        self.valid_metric_value = valid_score[1]
-        self.optimizer.step()
-        logger.info(f"--- Ending validation epoch {self.epoch}/{self.n_epochs}")
-
+        
+        valid_res = list(valid_metric.compute().items())[0]
+        self.metric_name = valid_res[0]
+        self.valid_metric_value = valid_res[1]
+        logger.info(f"--- Ending validating step.")
 
     def test(self):
-        self.teacher.eval()
-        self.student.eval()
-
         best_model = torch.load(os.path.join(self.params.dumps_dir, 'best_model.pth'))
         self.student.load_state_dict(best_model)
 
         logger.info(f"--- Testing...")
-        iter_bar = tqdm(self.test_loader, desc="-Iter")
-        for batch in iter_bar:
-            input_batch = {name: value.to(f'cuda:{self.gpu_id}') for name, value in batch.items() if name in self.teacher.__code__.co_varnames}
+        test_metric = datasets.load_metric('glue', self.params.glue_dataset)
+        for batch in self.test_loader:
+            input_batch = {name: value.to(f'cuda:{self.gpu_id}') for name, value in batch.items() if name in self.teacher.forward.__code__.co_varnames}
             input_batch['grad_on'] = False
             input_batch['is_predict_step'] = True
-            self.step(**input_batch)
+            predictions = self.step(**input_batch)
+            test_metric.add_batch(predictions=predictions, references=batch['labels'])
 
-        test_scores = list(self.main_metric.compute())
+        test_scores = list(test_metric.compute().items())[0]
         self.run.summary[f'test/{self.metric_name}'] = test_scores[1]
         self.run.summary[f'valid/{self.metric_name}'] = self.best_valid_metric_value
         
-        self.summary_table.add_row([self.params.glue_dataset, self.metric_name, 
-                                    self.best_valid_metric_value, test_scores[1]])
+        self.summary_table.add_data(self.params.glue_dataset, self.metric_name, 
+                                    self.best_valid_metric_value, test_scores[1])
         self.run.log({'summary': self.summary_table})
 
     
@@ -358,80 +381,99 @@ class Distiller(object):
                 self.c = self.student_to_poincare.c
 
 
-    def end_epoch(self):
-        self.epoch += 1
-        self.log()
+    def end_step(self):
+        self.n_log_step += 1
+        self.log_step()
 
-        cur_valid_loss = self.valid_loss_epoch / self.n_valid_batches_seen
-        if cur_valid_loss < self.best_valid_loss_epoch:
-            self.best_valid_loss_epoch = cur_valid_loss
+        cur_valid_loss = self.valid_loss_step / self.n_valid_batches_seen
+        if cur_valid_loss < self.best_valid_loss_step:
+            self.best_valid_loss_step = cur_valid_loss
         if self.valid_metric_value > self.best_valid_metric_value:
             self.best_valid_metric_value = self.valid_metric_value
             self.save_checkpoint('best_model.pth')
+        else:
+            self.lr_drop_ct += 1
+            self.validation_patience_ct += 1
+            logger.info(f'LR drop patience increased: {self.lr_drop_ct}/{self.lr_drop_patience}')
+            logger.info(f'Validation patience increased: {self.validation_patience_ct}/{self.valid_patience}')
+
+            if self.lr_drop_ct == self.lr_drop_patience:
+                self.optimizer.param_groups[0]['lr'] /= self.lr_drop_div
+                self.lr_drop_ct = 0
+        
+        if self.validation_patience_ct == self.valid_patience:
+            self.end_train_flag = True
 
         self.save_checkpoint('last_checkpoint.pth', mode='full')
-        self.save_checkpoint(f'epoch_{self.epoch}.pth')
-        
+        self.save_checkpoint(f'step_{self.n_log_step}.pth')
 
-        self.train_loss_epoch = 0
-        self.valid_loss_epoch = 0
+        self.train_loss_step = 0
+        self.valid_loss_step = 0
 
         if self.alpha_ce > 0.0:
-            self.train_loss_ce_epoch = 0.0
-            self.valid_loss_ce_epoch = 0.0
+            self.train_loss_ce_step = 0.0
+            self.valid_loss_ce_step = 0.0
 
         if self.alpha_kl > 0.0:
-            self.train_loss_kl_epoch = 0.0
-            self.valid_loss_kl_epoch = 0.0
+            self.train_loss_kl_step = 0.0
+            self.valid_loss_kl_step = 0.0
 
         if self.alpha_mse > 0.0:
-            self.train_loss_mse_epoch = 0.0
-            self.valid_loss_mse_epoch = 0.0
+            self.train_loss_mse_step = 0.0
+            self.valid_loss_mse_step = 0.0
 
         if self.alpha_contrastive > 0.0:
-            self.train_loss_contrastive_epoch = 0.0
-            self.valid_loss_contrastive_epoch = 0.0
+            self.train_loss_contrastive_step = 0.0
+            self.valid_loss_contrastive_step = 0.0
 
-    
-    def log(self):
-        log_dict = {'epoch': self.epoch, 
-                    'temperature': self.temperature.item() if self.params.train_temperature else self.temperature, 
-                    'train/loss_epoch': self.train_loss_epoch / self.n_train_batches_seen, 
-                    'valid/loss_epoch': self.valid_loss_epoch / self.n_valid_batches_seen, 
-                    'lr': self.optimizer.param_groups[0]['lr'], 
-                    f'train/{self.metric_name}': self.train_metric_value, 
-                    f'valid/{self.metric_name}': self.valid_metric_value
-        }
+        self.n_train_batches_seen = 0
+        self.n_valid_batches_seen = 0
 
+
+    def log_step(self):
+        log_dict = {'step': self.n_log_step, 
+                    'step/temperature': self.temperature.item() if self.params.train_temperature else self.temperature, 
+                    'step/train_loss_cum_avg': self.train_loss_step / self.n_train_batches_seen, 
+                    'batch/train_loss': self.train_loss_batch, 
+                    'step/valid_loss_cum_avg': self.valid_loss_step / self.n_valid_batches_seen,
+                    'step/lr': self.optimizer.param_groups[0]['lr'],  
+                    f'step/train_{self.metric_name}': self.train_metric_value, 
+                    f'step/valid_{self.metric_name}': self.valid_metric_value
+                    }
         if self.params.hidden_distil_type == 'hyperbolic':
-            log_dict['curvature'] = self.c.item() if self.params.train_c is not None and 'train' in self.params.train_c else self.c
+            log_dict['step/curvature'] = self.c.item() if self.params.train_c is not None and 'train' in self.params.train_c else self.c
 
         if self.alpha_ce > 0.0:
-            log_dict['train/loss_ce_epoch'] = self.train_loss_ce_epoch / self.n_train_batches_seen
-            log_dict['valid/loss_ce_epoch'] = self.valid_loss_ce_epoch / self.n_valid_batches_seen
+            log_dict['batch/train_loss_ce'] = self.train_loss_ce_batch
+            log_dict['step/train_loss_ce_cum_avg'] = self.train_loss_ce_step / self.n_train_batches_seen
+            log_dict['step/valid_loss_ce_cum_avg'] = self.valid_loss_ce_step / self.n_valid_batches_seen
         
         if self.alpha_kl > 0.0:
-            log_dict['train/loss_kl_epoch'] = self.train_loss_kl_epoch / self.n_train_batches_seen
-            log_dict['valid/loss_kl_epoch'] = self.valid_loss_kl_epoch / self.n_valid_batches_seen
+            log_dict['batch/train_loss_kl'] = self.train_loss_kl_batch
+            log_dict['step/train_loss_kl_cum_avg'] = self.train_loss_kl_step / self.n_train_batches_seen
+            log_dict['step/valid_loss_kl_cum_avg'] = self.valid_loss_kl_step / self.n_valid_batches_seen
 
         if self.alpha_mse > 0.0:
-            log_dict['train/loss_mse_epoch'] = self.train_loss_mse_epoch / self.n_train_batches_seen
-            log_dict['valid/loss_mse_epoch'] = self.valid_loss_mse_epoch / self.n_valid_batches_seen
+            log_dict['batch/train_loss_mse'] = self.train_loss_mse_batch
+            log_dict['step/train_loss_mse_cum_avg'] = self.train_loss_mse_step / self.n_train_batches_seen
+            log_dict['step/valid_loss_mse_cum_avg'] = self.valid_loss_mse_step / self.n_valid_batches_seen
 
         if self.alpha_contrastive > 0.0:
-            log_dict['train/loss_contrastive_epoch'] = self.train_loss_contrastive_epoch / self.n_train_batches_seen
-            log_dict['valid/loss_contrastive_epoch'] = self.valid_loss_contrastive_epoch / self.n_valid_batches_seen
+            log_dict['batch/train_loss_contrastive'] = self.train_loss_contrastive_batch
+            log_dict['step/train_loss_contrastive_cum_avg'] = self.train_loss_contrastive_step / self.n_train_batches_seen
+            log_dict['step/valid_loss_contrastive_cum_avg'] = self.valid_loss_contrastive_step / self.n_valid_batches_seen
 
         self.run.log(log_dict)
+        logger.info(json.dumps(log_dict))
 
-    
+
     def save_checkpoint(self, checkpoint_name, mode=None):
         if mode == 'full':
-            torch.save(dict(epoch=self.epoch, 
+            torch.save(dict(step=self.n_log_step, 
                             model_state_dict=self.student.state_dict(), 
                             optimizer_state_dict=self.optimizer.state_dict(), 
-                            best_valid_loss=self.best_valid_loss_epoch, 
-                            cur_valid_loss=self.valid_loss_epoch / self.n_valid_batches_seen, 
+                            best_valid_loss=self.best_valid_loss_step, 
+                            cur_valid_loss=self.valid_loss_step / self.n_valid_batches_seen, 
                             cur_valid_metric=self.valid_metric_value, 
                             best_valid_metric_value=self.best_valid_metric_value), 
                         os.path.join(self.params.dumps_dir, checkpoint_name))
@@ -440,4 +482,3 @@ class Distiller(object):
             mdl_to_save.config.save_pretrained(self.params.dumps_dir)
             state_dict = mdl_to_save.state_dict()
             torch.save(state_dict, os.path.join(self.params.dumps_dir, checkpoint_name))
-
