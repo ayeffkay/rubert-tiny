@@ -5,28 +5,26 @@ import datasets
 import torch
 from transformers.models.auto.tokenization_auto import AutoTokenizer
 
-def encode(examples, tokenizer, padding='longest', truncation=True):
+def encode(examples, tokenizer, tokenizer_params):
     field_sets = [('question', 'sentence'), 
                   ('sentence', ), 
                   ('sentence1', 'sentence2'), 
                   ('question1', 'question2'), 
                   ('premise', 'hypothesis')
                 ]
-    tok_input = dict(text=None, text_pair=None, 
-                    padding=padding, truncation=truncation)
+    tok_input = dict(text=None, text_pair=None)
     for field_set in field_sets:
         if all(field_name in examples for field_name in field_set if field_name in set(list(sum(field_sets, ())))):
             tok_input['text'] = examples[field_set[0]]
             if len(field_set) == 2:
                 tok_input['text_pair'] = examples[field_set[1]]
             break
-    return tokenizer(**tok_input)
+    return tokenizer(**tok_input, **tokenizer_params)
 
-def load_glue_dataset(dataset_name, tokenizer_name, padding='max_length', truncation=True, subset_type='train', split_prop=0, seed=42):
+def load_glue_dataset(dataset_name, tokenizer, tokenizer_params, subset_type='train', split_prop=0, seed=42):
     dataset = datasets.load_dataset('glue', dataset_name, split=subset_type)
     dataset = dataset.rename_column('label', 'labels')
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
-    partial_encode = partial(encode, tokenizer=tokenizer, padding=padding, truncation=truncation)
+    partial_encode = partial(encode, tokenizer=tokenizer, tokenizer_params=tokenizer_params)
     dataset = dataset.map(partial_encode)
     columns = ['input_ids', 'attention_mask', 'labels']
     if 'token_type_ids' in dataset.features:
@@ -35,7 +33,7 @@ def load_glue_dataset(dataset_name, tokenizer_name, padding='max_length', trunca
     if split_prop > 0:
         train_test = dataset.train_test_split(test_size=split_prop, seed=seed)
         return train_test['train'], train_test['test']
-    return dataset
+    return dataset, None
 
 
 def collate_fn(batch, pad_value=0):

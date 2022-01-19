@@ -6,6 +6,7 @@ import ruamel.yaml as yaml
 import os
 import wandb
 import shutil
+import re
 
 
 parser = ArgumentParser()
@@ -77,9 +78,8 @@ contrastive_options.add_argument('--teacher_student_prop', nargs='?', type=float
 contrastive_options.add_argument('--negative_sampling_strategy', choices=['teacher', 'student', 'teacher_and_student', None], default=None)
 contrastive_options.add_argument('--add_neg_size_constant', action='store_true')
 
-mse_options = parser.add_argument_group('mse options')
+mse_options = distil.add_argument_group('mse options')
 mse_options.add_argument('--alpha_mse', type=float, default=0.0)
-
 
 distil_subparsers = distil.add_subparsers(dest='hidden_distil_type')
 
@@ -111,23 +111,30 @@ hyplinear.add_argument('--use_bias', action='store_false')
 
 args, _ = parser.parse_known_args()
 
-
-if os.path.exists(args.dumps_dir):
-    shutil.rmtree(args.dumps_dir)
-
 with open(args.wandb_config) as f:
     args.wandb_config = yaml.load(f)
-os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu_id)
+
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_id)
+
 os.environ['WANDB_API_KEY'] = args.wandb_config['WANDB_API_KEY']
 os.environ['WANDB_DIR'] = args.wandb_config['WANDB_DIR']
 if os.path.exists(args.dumps_dir):
     shutil.rmtree(args.dumps_dir)
 os.makedirs(os.environ['WANDB_DIR'], exist_ok=True)
 os.makedirs(args.dumps_dir, exist_ok=True)
+
+for file in os.listdir(os.environ['WANDB_DIR']):
+    if re.match(f'{args.run_id}*', file):
+        wandb_log = os.path.join(os.environ['WANDB_DIR'], args.run_id)
+        shutil.rmtree(wandb_log)
 os.environ['WANDB_ENTITY'] = args.wandb_config['WANDB_ENTITY']
 os.environ['WANDB_MODE'] = args.wandb_config['WANDB_MODE']
 
 config = vars(args)
+config_dir = os.path.join(args.dumps_dir, 'training_config.json')
+with open(config_dir, 'w') as f:
+    json.dump(config, f)
 
 args.run = wandb.init(reinit=args.wandb_config['reinit'], 
                       id=args.run_id, 

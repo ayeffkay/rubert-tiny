@@ -35,7 +35,7 @@ class StudentTrainer(object):
         self.val_every_n_batches = params.val_every_n_batches
         self.end_train_flag = False
 
-        self.summary_table = wandb.Table(columns=['Task', 'Metric', 'Validation score', 'Test score'])
+        self.summary_table = wandb.Table(columns=['Task', 'Config_name', 'Metric', 'Train score', 'Validation score', 'Test score'])
 
         tokenizer = AutoTokenizer.from_pretrained(params.tokenizer_name)
         train_data, _ = load_data.load_glue_dataset(params.glue_dataset, 
@@ -104,7 +104,7 @@ class StudentTrainer(object):
 
     def train(self):
         logger.info("Starting training")
-        torch.save(self.student.state_dict(), 'best_model.pth')
+        self.save_checkpoint('best_model.pth')
 
         while True:
             if self.end_train_flag:
@@ -171,10 +171,14 @@ class StudentTrainer(object):
             test_metric.add_batch(predictions=predictions, references=batch['labels'])
 
         test_scores = list(test_metric.compute().items())[0]
+        self.run.summary[f'train/{self.metric_name}'] = self.train_metric_value
         self.run.summary[f'test/{self.metric_name}'] = test_scores[1]
         self.run.summary[f'valid/{self.metric_name}'] = self.best_valid_metric_value
         
-        self.summary_table.add_data(self.params.glue_dataset, self.metric_name, 
+        self.summary_table.add_data(self.params.glue_dataset, 
+                                    self.params.run_id, 
+                                    self.metric_name, 
+                                    self.train_metric_value, 
                                     self.best_valid_metric_value, test_scores[1])
         self.run.log({'summary': self.summary_table})
 
