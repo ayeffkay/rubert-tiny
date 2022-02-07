@@ -30,8 +30,8 @@ For training you'll need
 ### Training scripts
 To run train (you'll probably need to change GPU count before running):
 ```
-chmod +x run_train.sh
-./run_train.sh
+chmod +x {script_name}.sh
+./{script_name}.sh
 ```
 Required scripts:
 1. `train.py` -- wrapper to run train
@@ -42,4 +42,12 @@ Required scripts:
 6. `grouped_batch_sampler.py` -- group batches by length, to reduce padding
 7. `utils.py` -- auxilary utils for training
 8. `setup_logger.py` -- initialize file logger for few separate scripts to be able to write logs into the same file [optional]
+
+## Hyperbolic scripts
+1. `delta.py` -- functions to precompute curvature
+2. `hyptorch/` -- hyperbolic layers and related stuff
+
+## GLUE
+`distil-finetuned-en` folder contains scripts for fine-tuning teachers on GLUE and distillation
+
 
