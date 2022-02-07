@@ -73,7 +73,7 @@ def get_matched_ts_ids(ids_file):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--force", action="store_true", help="Overwrite dump_path if it already exists.")
-    parser.add_argument("--load_from_checkpoint", type='str', nargs='?')
+    parser.add_argument("--load_from_checkpoint", nargs='?')
     parser.add_argument(
          "--dump_path", type=str, required=True, help="The output directory (log, checkpoints, parameters, etc.)"
     )
