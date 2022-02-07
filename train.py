@@ -73,6 +73,7 @@ def get_matched_ts_ids(ids_file):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--force", action="store_true", help="Overwrite dump_path if it already exists.")
+    parser.add_argument("--load_from_checkpoint", type='str', nargs='?')
     parser.add_argument(
          "--dump_path", type=str, required=True, help="The output directory (log, checkpoints, parameters, etc.)"
     )
@@ -116,13 +117,15 @@ def main():
     parser.add_argument("--word_rand", default=0.1, type=float, help="Proportion of tokens to randomly replace.")
 
     parser.add_argument("--alpha_mse", default=0.0, type=float, help="Linear weight of the MSE loss. Must be >=0.")
-    parser.add_argument('--projection_strategy', choices=['last', 'skip', 'average', 'average_by_layers', 'select_by_ids', None], default=None,
+    parser.add_argument('--projection_strategy', choices=['last', 'skip', 'average', 'average_by_layers', 
+                        'select_by_ids', 'weighted_average_by_layers', None], default=None,
                         help="""How to use student and teacher hidden representations for MSE loss.
                         last -- use last states of teacher and student (1-1 mapping), 
                         skip -- use intermediate states from teacher and student (1-1 mapping), 
                         average -- average teacher layers output sequentially to fit number of student hidden layers (1-n mapping)
                         average_by_layers -- average student and teacher hidden representations by layers (m-n mapping to 1-1 mapping)
-                        select_by_ids -- select teacher and student layers ids using argument `t_s_layers_ids`
+                        select_by_ids -- select teacher and student layers ids using argument `t_s_layers_ids`, 
+                        weighted_average_by_layers - same as average by layers, but sample weights from Gamma distribution
                         """)
     parser.add_argument('--t_s_layers_ids', type=json.loads, nargs='?', 
                        help="""Teacher and student hidden layer ids in the form {'teacher': id, 'student': id}. 
@@ -190,6 +193,8 @@ def main():
     kl_match_group.add_argument('--matching_ids', nargs='?')
 
     parser.add_argument('--align_hiddens', choices=['match', 'reduce', None], default=None)
+    parser.add_argument('--align_logits', choices=['match', 'reduce', None], default=None)
+    parser.add_argument('--average_logits', action='store_true')
 
     subparsers = parser.add_subparsers(help="""Specific options""", dest="hidden_distil_type")
     hyp = subparsers.add_parser('hyperbolic')
@@ -231,7 +236,8 @@ def main():
                         "Use `--force` if you want to overwrite it"
                     )
             else:
-                shutil.rmtree(args.dump_path)
+                if args.load_from_checkpoint is None:
+                    shutil.rmtree(args.dump_path)
 
         if not os.path.exists(args.dump_path):
             os.makedirs(args.dump_path)

@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 
 
+
 try:
     from torch.utils.tensorboard import SummaryWriter
 except ImportError:
@@ -32,6 +33,7 @@ import custom_step
 import hyptorch.nn as hypnn
 import hyptorch.pmath as hypmath
 import delta
+
 
 class Distiller:
     def __init__(
@@ -48,6 +50,7 @@ class Distiller:
         self.teacher = teacher
 
         self.student_config = AutoConfig.from_pretrained(params.student_name)
+        self.teacher_config = AutoConfig.from_pretrained(params.teacher_name)
         self.student_vocab_size = student.config.vocab_size
         self.teacher_vocab_size = teacher.config.vocab_size
 
@@ -143,42 +146,15 @@ class Distiller:
         logger.info("--- Initializing model optimizer")
         assert params.gradient_accumulation_steps >= 1
 
-        no_decay = ["bias", "LayerNorm.weight"]
-        optimizer_grouped_parameters = [
-            {
-                "params": [
-                    p for n, p in student.named_parameters() if not any(nd in n for nd in no_decay) and p.requires_grad
-                ],
-                "weight_decay": params.weight_decay,
-            },
-            {
-                "params": [
-                    p for n, p in student.named_parameters() if any(nd in n for nd in no_decay) and p.requires_grad
-                ],
-                "weight_decay": 0.0,
-            }
-        ]
+        optimizer_grouped_parameters = []
+        custom_step.add_param_group(optimizer_grouped_parameters, student, params.weight_decay)
+
         logger.info(
             "------ Number of trainable parameters (student): %i"
             % sum([p.numel() for p in self.student.parameters() if p.requires_grad])
         )
         logger.info("------ Number of parameters (student): %i" % sum([p.numel() for p in self.student.parameters()]))
-        self.optimizer = AdamW(
-            optimizer_grouped_parameters, lr=params.learning_rate, eps=params.adam_epsilon, betas=(0.9, 0.98)
-        )
-
-        self.num_steps_epoch = len(self.train_dataloader)
-        num_train_optimization_steps = (
-            int(self.num_steps_epoch / params.gradient_accumulation_steps * params.n_epoch) + 1
-        )
-        self.warmup_steps = math.ceil(num_train_optimization_steps * params.warmup_prop)
-        self.const_scheduler_with_warmup = get_constant_schedule_with_warmup(self.optimizer, 
-                                                         num_warmup_steps=self.warmup_steps)
-        self.reduce_on_plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='min', threshold_mode='abs', 
-                                                                            factor=params.reduce_factor, patience=params.valid_epochs_patience, 
-                                                                            threshold=1e-2, cooldown=params.valid_epochs_patience, 
-                                                                            eps=1e-10, min_lr=1e-6, verbose=True)
-                                                        
+                                            
         if self.alpha_ce > 0.0:   
             self.last_loss_ce = 0
             self.last_valid_loss_ce_epoch = 0
@@ -189,6 +165,17 @@ class Distiller:
             self.lm_loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
 
         layers_ct = 4 if self.params.projection_strategy in ['last', 'skip', 'average'] else 1
+        if self.params.projection_strategy == 'weighted_average_by_layers':
+            a = torch.rand(self.teacher_config.num_hidden_layers + 1, requires_grad=True, device=f'cuda:{params.local_rank}')
+            b = torch.rand(self.student_config.num_hidden_layers + 1, requires_grad=True, device=f'cuda:{params.local_rank}')
+            self.teacher_weights = nn.Parameter(a)
+            self.student_weights = nn.Parameter(b)
+            custom_step.add_param_group(optimizer_grouped_parameters, self.teacher_weights, params.weight_decay)
+            custom_step.add_param_group(optimizer_grouped_parameters, self.student_weights, params.weight_decay)
+        else:
+            self.teacher_weights = None
+            self.student_weights = None
+
         if self.alpha_mse > 0.0:
             self.last_loss_mse = 0
             self.last_valid_loss_mse_epoch = 0
@@ -196,13 +183,15 @@ class Distiller:
 
             if self.params.project_to == 'teacher':
                 self.hid_projectors_mse_student = nn.ModuleList([nn.Linear(student.config.hidden_size, 
-                                                                    teacher.config.hidden_size).to(f'cuda:{params.local_rank}') for _ in range(layers_ct)])
+                                                                teacher.config.hidden_size).to(f'cuda:{params.local_rank}') for _ in range(layers_ct)])
                 self.hid_projectors_mse_teacher = None
+                custom_step.add_param_group(optimizer_grouped_parameters, self.hid_projectors_mse_student, params.weight_decay)
 
             elif self.params.project_to == 'student':
                 self.hid_projectors_mse_teacher = nn.ModuleList([nn.Linear(teacher.config.hidden_size, 
                                                                 student.config.hidden_size).to(f'cuda:{params.local_rank}') for _ in range(layers_ct)])
                 self.hid_projectors_mse_student = None
+                custom_step.add_param_group(optimizer_grouped_parameters, self.hid_projectors_mse_teacher, params.weight_decay)
         
             else:
                 self.hid_projectors_mse_teacher = nn.ModuleList([nn.Linear(teacher.config.hidden_size, 
@@ -210,11 +199,14 @@ class Distiller:
                 self.hid_projectors_mse_student = nn.ModuleList([nn.Linear(student.config.hidden_size, 
                                                                 self.params.intermediate_dim).to(f'cuda:{params.local_rank}') for _ in range(layers_ct)])
 
+                
+                custom_step.add_param_group(optimizer_grouped_parameters, self.hid_projectors_mse_teacher, params.weight_decay)
+                custom_step.add_param_group(optimizer_grouped_parameters, self.hid_projectors_mse_student, params.weight_decay)
+
         if self.alpha_cos > 0.0:
             self.last_loss_cos = 0
             self.last_valid_loss_cos_epoch = 0
             self.cosine_loss_fct = nn.CosineEmbeddingLoss(reduction="mean")
-            ## TODO: self.attn_projector
 
         self.s_hid_dim = student.config.hidden_size
         self.t_hid_dim = teacher.config.hidden_size
@@ -259,15 +251,19 @@ class Distiller:
                         self.hid_projectors_contrastive_teacher = None
                         self.hid_projectors_contrastive_student = nn.ModuleList([hypnn.HypLinear(self.s_hid_dim, self.t_hid_dim, 
                                                                                                  self.c, params.use_bias).to(f'cuda:{params.local_rank}') for _ in range(layers_ct)])
+                        custom_step.add_param_group(optimizer_grouped_parameters, self.hid_projectors_contrastive_student, params.weight_decay)
                     elif params.project_to =='student':
                         self.hid_projectors_contrastive_student = None
                         self.hid_projectors_contrastive_teacher = nn.ModuleList([hypnn.HypLinear(self.t_hid_dim, self.s_hid_dim, 
                                                                                                  self.c, params.use_bias).to(f'cuda:{params.local_rank}') for _ in range(layers_ct)])
+                        custom_step.add_param_group(optimizer_grouped_parameters, self.hid_projectors_contrastive_teacher, params.weight_decay)
                     else:
                         self.hid_projectors_contrastive_student = nn.ModuleList([hypnn.HypLinear(self.s_hid_dim, params.intermediate_dim, 
                                                                                                  self.c, params.use_bias).to(f'cuda:{params.local_rank}') for _ in range(layers_ct)])
                         self.hid_projectors_contrastive_teacher = nn.ModuleList([hypnn.HypLinear(self.t_hid_dim, params.intermediate_dim, 
                                                                                                  self.c, params.use_bias).to(f'cuda:{params.local_rank}') for _ in range(layers_ct)])
+                        custom_step.add_param_group(optimizer_grouped_parameters, self.hid_projectors_contrastive_student, params.weight_decay)
+                        custom_step.add_param_group(optimizer_grouped_parameters, self.hid_projectors_contrastive_teacher, params.weight_decay)
                 else:
                     if params.project_to == 'teacher':
                         s_ball_dim = self.t_hid_dim
@@ -284,9 +280,9 @@ class Distiller:
                 self.teacher_to_poincare = hypnn.ToPoincare(self.c, train_c=params.adjust_c == 'train_exp_map_teacher', 
                                                             train_x=params.train_x, ball_dim=t_ball_dim, riemannian=params.riemannian)
                 if params.adjust_c == 'train_exp_map_student':
-                    self.optimizer.add_param_group({'params': self.student_to_poincare.parameters()})
+                    custom_step.add_param_group(optimizer_grouped_parameters, self.student_to_poincare, params.weight_decay)
                 elif params.adjust_c == 'train_exp_map_teacher':
-                    self.optimizer.add_param_group({'params': self.teacher_to_poincare.parameters()})
+                    custom_step.add_param_group(optimizer_grouped_parameters, self.teacher_to_poincare, params.weight_decay)
             else:
                 self.similarity_metric = custom_step.cosine_similarity
 
@@ -297,13 +293,34 @@ class Distiller:
                 if params.project_to == 'teacher':
                     self.hid_projectors_contrastive_teacher = None
                     self.hid_projectors_contrastive_student = nn.ModuleList([nn.Linear(self.s_hid_dim, self.t_hid_dim).to(f'cuda:{self.params.local_rank}') for _ in range(layers_ct)])
+                    custom_step.add_param_group(optimizer_grouped_parameters, self.hid_projectors_contrastive_student, params.weight_decay)
                 elif params.project_to =='student':
                     self.hid_projectors_contrastive_student = None
                     self.hid_projectors_contrastive_teacher = nn.ModuleList([nn.Linear(self.t_hid_dim, self.s_hid_dim).to(f'cuda:{self.params.local_rank}') for _ in range(layers_ct)])
+                    custom_step.add_param_group(optimizer_grouped_parameters, self.hid_projectors_contrastive_teacher, params.weight_decay)
                 else:
                     self.hid_projectors_contrastive_student = nn.ModuleList([nn.Linear(self.s_hid_dim, params.intermediate_dim).to(f'cuda:{self.params.local_rank}') for _ in range(layers_ct)])
                     self.hid_projectors_contrastive_teacher = nn.ModuleList([nn.Linear(self.t_hid_dim, params.intermediate_dim).to(f'cuda:{self.params.local_rank}') for _ in range(layers_ct)])
+                    custom_step.add_param_group(optimizer_grouped_parameters, self.hid_projectors_contrastive_student, params.weight_decay)
+                    custom_step.add_param_group(optimizer_grouped_parameters, self.hid_projectors_contrastive_teacher, params.weight_decay)  
 
+        self.optimizer = AdamW(
+            optimizer_grouped_parameters, lr=params.learning_rate, eps=params.adam_epsilon, betas=(0.9, 0.98)
+        )
+
+        self.num_steps_epoch = len(self.train_dataloader)
+        num_train_optimization_steps = (
+            int(self.num_steps_epoch / params.gradient_accumulation_steps * params.n_epoch) + 1
+        )
+        self.warmup_steps = math.ceil(num_train_optimization_steps * params.warmup_prop)
+        self.const_scheduler_with_warmup = get_constant_schedule_with_warmup(self.optimizer, 
+                                                         num_warmup_steps=self.warmup_steps)
+        self.reduce_on_plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='min', threshold_mode='abs', 
+                                                                            factor=params.reduce_factor, patience=params.valid_epochs_patience, 
+                                                                            threshold=1e-2, cooldown=params.valid_epochs_patience, 
+                                                                            eps=1e-10, min_lr=1e-6, verbose=True)
+        if params.load_from_checkpoint is not None:
+            self.load_from_checkpoint(params.load_from_checkpoint)
 
     @staticmethod
     def generate_padding_mask(seq_len, lengths):
@@ -418,6 +435,7 @@ class Distiller:
         if self.is_master:
             logger.info("Save very last checkpoint as `pytorch_model.bin`.")
             self.save_checkpoint(checkpoint_name="pytorch_model.bin")
+            self.save_full()
             logger.info("Training is finished")
 
     def validate(self):
@@ -441,6 +459,10 @@ class Distiller:
 
         if self.n_gradient_updates_total > self.warmup_steps:
             self.reduce_on_plateau.step(self.total_valid_loss_epoch/self.n_valid_iter_epoch)
+            """
+            if self.trainable_projections:
+                self.reduce_on_plateau_.step(self.total_valid_loss_epoch/self.n_valid_iter_epoch)
+            """
 
         if self.is_master:
             logger.info(f"--- Ending validation epoch {self.epoch}/{self.params.n_epoch-1}")
@@ -461,15 +483,31 @@ class Distiller:
             loss = 0.0
             if self.params.t2s_mapping is not None:
                 t2s_out = self.student(input_ids=t2s_ids,
-                                        attention_mask=t2s_attn_mask)
+                                       attention_mask=t2s_attn_mask)
                 t2s_logits = t2s_out.logits
-                if self.params.t2s_vocab_padded is not None:
+                if self.params.align_logits == 'reduce' and self.params.t2s_vocab_padded is None:
+                    if self.alpha_ce > 0.0:
+                        student_reduced_logits = custom_step.reduce_seq(t2s_logits, student_split_ids, 
+                                                                       self.params.student_tok_ids['pad_token'], 
+                                                                       average=self.params.average_logits)
+
+                        student_reduced_logits = student_reduced_logits[:, :, self.params.student_matched]
+                        teacher_reduced_logits = t_logits[:, :, self.params.teacher_matched]
+
+                        student_reduced_logits = custom_step.masked_select_reshape_2d(student_reduced_logits, t_attn_mask, len(self.params.student_matched))
+                        teacher_reduced_logits = custom_step.masked_select_reshape_2d(teacher_reduced_logits, t_attn_mask, len(self.params.teacher_matched))
+
+                        loss_ce = custom_step.ce_step(student_reduced_logits, 
+                                                      teacher_reduced_logits, 
+                                                      self.ce_loss_fct, self.temperature)
+
+                elif self.params.t2s_vocab_padded is not None:
                     student_mapped_logits = custom_step.map_step(t2s_logits,
-                                                                student_split_ids, self.params.student_tok_ids['pad_token'],
-                                                                t2s_vocab_padded=self.params.t2s_vocab_padded,
-                                                                s2t_vocab_padded=self.params.s2t_vocab_padded,
-                                                                s2t_idxs_padded=self.params.s2t_idxs_padded,
-                                                                sum_probs=self.params.sum_probs)
+                                                                 student_split_ids, self.params.student_tok_ids['pad_token'],
+                                                                 t2s_vocab_padded=self.params.t2s_vocab_padded,
+                                                                 s2t_vocab_padded=self.params.s2t_vocab_padded,
+                                                                 s2t_idxs_padded=self.params.s2t_idxs_padded,
+                                                                 sum_probs=self.params.sum_probs)
                     student_mapped_logits = custom_step.masked_select_reshape_2d(student_mapped_logits, t_attn_mask, self.teacher_vocab_size)
                     teacher_mapped_logits = custom_step.masked_select_reshape_2d(t_logits, t_attn_mask, self.teacher_vocab_size)
                     if self.params.t2s_mapped_ids is not None:
@@ -479,7 +517,7 @@ class Distiller:
                     if self.alpha_ce > 0.0:
                         loss_ce = custom_step.ce_step(student_mapped_logits, teacher_mapped_logits, self.ce_loss_fct, self.temperature)
             # reduce-map was skipped
-            if self.params.matching_ids is not None and self.params.t2s_vocab_padded is None:
+            if self.params.align_logits == 'match' and self.params.matching_ids is not None and self.params.t2s_vocab_padded is None:
                 # use only logits for teacher tokens which could be represented by student tokens
                 # PAD -> PAD, UNK -> UNK, CLS -> CLS, unused1 -> skip, unused2 -> skip, ...
                 if self.alpha_ce > 0.0:
@@ -514,7 +552,9 @@ class Distiller:
                                                     s_hiddens, t_hiddens,
                                                     student_mask, teacher_mask, 
                                                     1, self.params.projection_strategy, 
-                                                    t_s_layers_ids=self.params.t_s_layers_ids)
+                                                    t_s_layers_ids=self.params.t_s_layers_ids, 
+                                                    student_weights=self.student_weights, 
+                                                    teacher_weights=self.teacher_weights)
                 if self.alpha_contrastive > 0.0:
                     loss_contrastive = custom_step.contrastive_step(self.params.train_cardinality, 
                                                                     self.hid_projectors_contrastive_student,
@@ -533,7 +573,8 @@ class Distiller:
                                                                     use_hyp_mapping_in_step=self.do_hyperbolic_mapping_in_step, 
                                                                     c=self.c if hasattr(self, 'c') else None, 
                                                                     teacher_to_poincare=self.teacher_to_poincare if hasattr(self, 'teacher_to_poincare') else None, 
-                                                                    student_to_poincare=self.student_to_poincare if hasattr(self, 'student_to_poincare') else None)
+                                                                    student_to_poincare=self.student_to_poincare if hasattr(self, 'student_to_poincare') else None, 
+                                                                    student_weights=self.student_weights, teacher_weights=self.teacher_weights)
 
             # reduce strategy, use t2s hiddens and t2s mapping
             elif self.params.align_hiddens == 'reduce' and self.params.t2s_mapping is not None:
@@ -545,7 +586,9 @@ class Distiller:
                                                     t_attn_mask, t_attn_mask, 1,
                                                     self.params.projection_strategy,
                                                     student_split_ids, self.params.student_tok_ids['pad_token'], 
-                                                    t_s_layers_ids=self.params.t_s_layers_ids)
+                                                    t_s_layers_ids=self.params.t_s_layers_ids, 
+                                                    student_weights=self.student_weights, 
+                                                    teacher_weights=self.teacher_weights)
                 if self.alpha_contrastive > 0.0:
                     loss_contrastive = custom_step.contrastive_step(self.params.train_cardinality,
                                                                     self.hid_projectors_contrastive_student, 
@@ -566,7 +609,8 @@ class Distiller:
                                                                     use_hyp_mapping_in_step=self.do_hyperbolic_mapping_in_step, 
                                                                     c=self.c if hasattr(self, 'c') else None, 
                                                                     teacher_to_poincare=self.teacher_to_poincare if hasattr(self, 'teacher_to_poincare') else None, 
-                                                                    student_to_poincare=self.student_to_poincare if hasattr(self, 'student_to_poincare') else None)
+                                                                    student_to_poincare=self.student_to_poincare if hasattr(self, 'student_to_poincare') else None, 
+                                                                    student_weights=self.student_weights, teacher_weights=self.teacher_weights)
             # no alignment strategy for hiddens specified
             elif self.params.align_hiddens is None and self.params.matching_ids is not None:
                 if self.alpha_contrastive > 0.0:
@@ -654,15 +698,6 @@ class Distiller:
         if self.n_train_iter_epoch % self.params.gradient_accumulation_steps == 0:
             torch.nn.utils.clip_grad_norm_(self.student.parameters(), self.params.max_grad_norm)
             self.optimizer.step()
-            """
-            if self.is_master:
-                for layer in self.hid_projectors_contrastive_student:
-                    for p in layer.parameters():
-                        print(p.data, p.grad)
-                        break
-                    break
-            """
-            
             self.optimizer.zero_grad()
 
             if self.params.hidden_distil_type == 'hyperbolic':
@@ -676,8 +711,6 @@ class Distiller:
 
             if self.n_gradient_updates_total < self.warmup_steps:
                 self.const_scheduler_with_warmup.step()
-
-            # self.scheduler.step()
 
             if self.n_gradient_updates_epoch % self.params.log_interval == 0:
                 self.log_tensorboard()
@@ -726,9 +759,10 @@ class Distiller:
                                     scalar_value=self.last_train_loss,
                                     global_step=self.n_sequences_total
                                     )
+        lr = [g['lr'] for g in self.optimizer.param_groups if 'lr' in g][0]
         self.tensorboard.add_scalar(
             tag="learning_rate_steps/lr",
-            scalar_value=self.optimizer.param_groups[0]['lr'],
+            scalar_value=lr, 
             global_step=self.n_gradient_updates_total
         )
 
@@ -807,9 +841,10 @@ class Distiller:
 
         if self.is_master:
             self.save_checkpoint(checkpoint_name=f"model_epoch_{self.epoch}.pth")
+            lr = [g['lr'] for g in self.optimizer.param_groups if 'lr' in g][0]
             self.tensorboard.add_scalar(
                 tag="epoch/learning_rate",
-                scalar_value=self.optimizer.param_groups[0]['lr'],
+                scalar_value=lr,
                 global_step=self.epoch + 1
             )
             self.tensorboard.add_scalar(
@@ -903,3 +938,48 @@ class Distiller:
         mdl_to_save.config.save_pretrained(self.dump_path)
         state_dict = mdl_to_save.state_dict()
         torch.save(state_dict, os.path.join(self.dump_path, checkpoint_name))
+
+
+    def save_full(self, checkpoint_name='last_checkpoint.pth'):
+        train_state_dict = dict(epoch=self.epoch, 
+                                temperature=self.t, 
+                                n_train_iter_total=self.n_train_iter_total, 
+                                n_sequences_total=self.n_sequences_total, 
+                                best_total_valid_loss_epoch=self.best_total_valid_loss_epoch,
+                                last_log=self.last_log, 
+                                teacher=self.teacher.state_dict(), 
+                                student=self.student.state_dict(), 
+                                optimizer=self.optimizer.state_dict(), 
+                                const_scheduler_with_warmup=self.const_scheduler_with_warmup.state_dict(), 
+                                reduce_on_plateau=self.reduce_on_plateau.state_dict())
+        if self.alpha_mse > 0.0:
+            if self.hid_projectors_mse_student is not None:
+                train_state_dict['hid_projectors_mse_student'] = self.hid_projectors_mse_student.state_dict()
+            if self.hid_projections_mse_teacher is not None:
+                train_state_dict['hid_projectors_mse_teacher'] = self.hid_projectors_mse_teacher.state_dict()
+        if self.alpha_contrastive > 0.0:
+            if self.hid_projectors_contrastive_student is not None:
+                train_state_dict['hid_projectors_contrastive_student'] = self.hid_projectors_contrastive_student.state_dict()
+            if self.hid_projectors_contrastive_teacher is not None:
+                train_state_dict['hid_projectors_contrastive_teacher'] = self.hid_projectors_contrastive_teacher.state_dict()
+            if self.params.hidden_distil_type == 'hyperbolic':
+                train_state_dict['c'] = self.c
+                train_state_dict['student_to_poincare'] = self.student_to_poincare.state_dict()
+                train_state_dict['teacher_to_poincare'] = self.teacher_to_poincare.state_dict()
+        if self.alpha_mse + self.alpha_contrastive > 0.0 and self.params.projection_strategy == 'weighted_average_by_layers':
+            train_state_dict['teacher_weights'] = self.teacher_weights
+            train_state_dict['student_weights'] = self.student_weights
+
+        torch.save(train_state_dict, os.path.join(self.dump_path, checkpoint_name))
+
+    
+    def load_from_checkpoint(self, checkpoint_name):
+        ckpt = torch.load(checkpoint_name)
+        for k, v in ckpt.items():
+            if hasattr(self, k):
+                if isinstance(v, dict):
+                    module = getattr(self,k)
+                    module.load_state_dict(v)
+                    setattr(self, k, module)
+                else:
+                    setattr(self, k, v)
