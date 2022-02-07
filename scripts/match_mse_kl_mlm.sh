@@ -23,7 +23,9 @@ python -m torch.distributed.launch \
     --student_pretrained_weights distilrubert_tiny_weights.pth \
     --teacher_name ru_convers \
     --temperature 2 \
-    --alpha_ce 2.0 --alpha_mlm 0.5 --alpha_mse 0.1 --projection_strategy average_by_layers \
+    --alpha_ce 2.0 --alpha_mlm 0.5 \
+    --align_logits match \
+    --alpha_mse 0.1 --projection_strategy average_by_layers \
     --align_hiddens match \
     --student_token_counts student_counts.pickle \
     --n_epoch 64 --batch_size 4 --group_by_size \

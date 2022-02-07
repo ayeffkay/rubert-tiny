@@ -24,8 +24,9 @@ python -m torch.distributed.launch \
     --teacher_name ru_convers \
     --temperature 2 \
     --alpha_ce 2.0 --alpha_mlm 0.5 \
+    --align_logits match \
     --student_token_counts student_counts.pickle \
-    --n_epoch 64 --batch_size 4 --group_by_size \
+    --n_epoch 64 --batch_size 5 --group_by_size \
     --gradient_accumulation_steps 128 \
     --learning_rate 5e-4 --valid_epochs_patience 3 --reduce_factor 5e-1 \
     --gpus $WORLD_SIZE \

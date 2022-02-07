@@ -25,6 +25,7 @@ python -m torch.distributed.launch \
     --temperature 2 \
     --alpha_ce 2.0 --alpha_mlm 0.5 --alpha_contrastive 0.1 --projection_strategy average_by_layers \
     --project_to student \
+    --align_logits match \
     --align_hiddens match --n_negative_samples 32 \
     --negative_sampling_strategy student \
     --student_token_counts student_counts.pickle \

@@ -31,12 +31,12 @@ def get_delta(model, dataloader, cuda_no=0, n_samples_slct=1000, n_components=10
             total_samples += len(logits)
     deltas = 0; diams = 0
     for _ in n_tries:
-        idxs_slct = np.random.choice(total_samples, size=n_samples_slct, replace=False)   
-        features = np.vstack([np.array(features[i]) for i in idxs_slct])
+        idxs_slct = np.random.choice(range(total_samples), size=min(total_samples, n_samples_slct), replace=False)   
+        features_ = np.vstack([np.array(features[i]) for i in idxs_slct])
         if n_components > 0:
-            pca = PCA(n_components=min((n_components, features.shape[0], features.shape[1])))
-            features= pca.fit_transform(features)
-        dists = distance_matrix(features, features)
+            pca = PCA(n_components=min((n_components, features_.shape[0], features_.shape[1])))
+            features_ = pca.fit_transform(features_)
+        dists = distance_matrix(features_, features_)
         delta = hypdelta.delta_hyp(dists)
         diam = np.max(dists)
         deltas += delta

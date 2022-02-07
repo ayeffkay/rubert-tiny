@@ -24,6 +24,7 @@ python -m torch.distributed.launch \
     --teacher_name ru_convers \
     --temperature 2 \
     --alpha_ce 2.0 --alpha_mlm 0.5 --alpha_contrastive 0.1 --projection_strategy average_by_layers \
+    --align_logits match \
     --align_hiddens reduce --n_negative_samples -1 \
     --negative_sampling_strategy student \
     --student_token_counts student_counts.pickle \

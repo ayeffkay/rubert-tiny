@@ -1,47 +1,77 @@
 from argparse import ArgumentParser
 import pickle
-from transformers import (DistilBertConfig, 
+from transformers import (DistilBertConfig, BertConfig, AutoModelForSequenceClassification,
                           BertForMaskedLM, DistilBertForMaskedLM)
 from collections import defaultdict
 import torch
 
 if __name__ == '__main__':
     parser = ArgumentParser()
-    parser.add_argument('--mapping')
-    parser.add_argument('--teacher')
-    parser.add_argument('--student_config')
+    parser.add_argument('--mapping', nargs='?')
+    parser.add_argument('--teacher_name')
+    parser.add_argument('--teacher_weights', nargs='?')
+    parser.add_argument('--student_name')
     parser.add_argument('--dump_checkpoint')
     parser.add_argument('--vocab_transform', action='store_true')
+    parser.add_argument('--mode', choices=['masked_lm', 'finetuning'])
+    parser.add_argument('--num_labels', type=int, default=2, nargs='?')
     
     args, _ = parser.parse_known_args()
-    teacher_model = BertForMaskedLM.from_pretrained(args.teacher)
-    student_config = DistilBertConfig.from_json_file(args.student_config)
-    print(student_config.vocab_size)
-    student_model = DistilBertForMaskedLM(student_config)
-    
-    with open(args.mapping, 'rb') as f:
-        mapping_dict = pickle.load(f)
+    assert args.vocab_transform and args.mode == 'masked_lm'
 
-    student2teacher = defaultdict(list)
-    for teacher_id, student_ids in mapping_dict.items():
-        for student_id in student_ids:
-            if teacher_id not in student2teacher[student_id]:
-                student2teacher[student_id].append(teacher_id)
-                
+
+    if args.mode == 'masked_lm':
+        teacher_model = BertForMaskedLM.from_pretrained(args.teacher_name)
+        student_config = DistilBertConfig.from_pretrained(args.student_name)
+        student_model = DistilBertForMaskedLM(student_config)
+    if args.mode == 'finetuning':
+        student_config = DistilBertConfig.from_pretrained(args.student_name, num_labels=args.num_labels)
+        teacher_config = BertConfig.from_pretrained(args.teacher_name, num_labels=args.num_labels)
+
+        teacher_model = AutoModelForSequenceClassification.from_config(teacher_config)
+        teacher_model.load_state_dict(torch.load(args.teacher_weights))
+        student_model = AutoModelForSequenceClassification.from_config(student_config)
+
     teacher_sd = teacher_model.state_dict()
     student_sd = student_model.state_dict()
-    
+
     student_embs_name = 'distilbert.embeddings.word_embeddings.weight'
     teacher_embs_name = 'bert.embeddings.word_embeddings.weight'
-    for i in range(student_config.vocab_size):
-        teacher_ids = student2teacher[i]
-        if len(teacher_ids):
-            teacher_mean_embs = torch.stack([teacher_sd[teacher_embs_name][j] for j in teacher_ids]).mean(dim=0)
-            student_sd[student_embs_name][i] = teacher_mean_embs[:student_config.dim]
-        
+
     student_pos_ids_name = 'distilbert.embeddings.position_embeddings.weight'
     teacher_pos_ids_name = 'bert.embeddings.position_embeddings.weight'
-    student_sd[student_pos_ids_name] = teacher_sd[teacher_pos_ids_name][:, :student_config.dim]
+    
+    if args.mapping is not None:
+        with open(args.mapping, 'rb') as f:
+            mapping_dict = pickle.load(f)
+
+        student2teacher = defaultdict(list)
+        for teacher_id, student_ids in mapping_dict.items():
+            for student_id in student_ids:
+                if teacher_id not in student2teacher[student_id]:
+                    student2teacher[student_id].append(teacher_id)
+
+        for i in range(student_config.vocab_size):
+            teacher_ids = student2teacher[i]
+            if len(teacher_ids):
+                teacher_mean_embs = torch.stack([teacher_sd[teacher_embs_name][j] for j in teacher_ids]).mean(dim=0)
+                student_sd[student_embs_name][i] = teacher_mean_embs[:student_config.dim]
+            
+        student_sd[student_pos_ids_name] = teacher_sd[teacher_pos_ids_name][:, :student_config.dim]
+        for i in range(student_config.vocab_size):
+            if len(student2teacher[i]):
+                teacher_w = torch.stack([teacher_sd['cls.predictions.decoder.weight'][j] for j in student2teacher[i]]).mean(dim=0)
+                student_sd['vocab_projector.weight'][i] = teacher_w[:student_config.dim]
+        for i in range(student_config.vocab_size):
+            if len(student2teacher[i]):
+                teacher_w = torch.tensor([teacher_sd['cls.predictions.decoder.bias'][j] for j in student2teacher[i]]).mean(dim=0)
+                student_sd['vocab_projector.bias'][i] = teacher_w
+    else:
+        student_sd[student_embs_name] = teacher_sd[teacher_embs_name][:, :student_config.dim]
+        student_sd[student_pos_ids_name] = teacher_sd[teacher_pos_ids_name][:, :student_config.dim]
+        if args.mode != 'classification':
+            student_sd["vocab_projector.weight"] = teacher_sd["cls.predictions.decoder.weight"][:, :student_config.dim]
+            student_sd["vocab_projector.bias"] = teacher_sd["cls.predictions.bias"]
     
     for w in ['weight', 'bias']:
         student_layer_norm_name = f'distilbert.embeddings.LayerNorm.{w}'
@@ -122,15 +152,6 @@ if __name__ == '__main__':
                 teacher_intermediate = []
                 teacher_out_dense = []
                 teacher_out_layer_norm_ = []
-    
-    for i in range(student_config.vocab_size):
-        if len(student2teacher[i]):
-            teacher_w = torch.stack([teacher_sd['cls.predictions.decoder.weight'][j] for j in student2teacher[i]]).mean(dim=0)
-            student_sd['vocab_projector.weight'][i] = teacher_w[:student_config.dim]
-    for i in range(student_config.vocab_size):
-        if len(student2teacher[i]):
-            teacher_w = torch.tensor([teacher_sd['cls.predictions.decoder.bias'][j] for j in student2teacher[i]]).mean(dim=0)
-            student_sd['vocab_projector.bias'][i] = teacher_w
         
     if args.vocab_transform:
         student_sd['vocab_transform.weight'] = teacher_sd['cls.predictions.transform.dense.weight'][:student_config.dim, :student_config.dim]
@@ -138,12 +159,7 @@ if __name__ == '__main__':
         student_sd['vocab_layer_norm.weight'] = teacher_sd['cls.predictions.transform.LayerNorm.weight'][:student_config.dim]
         student_sd['vocab_layer_norm.bias'] = teacher_sd['cls.predictions.transform.LayerNorm.bias'][:student_config.dim]
     
-    #Path(args.dump_checkpoint).mkdir(parents=True, exist_ok=True)
-    torch.save(student_sd, args.dump_checkpoint)
-    for k, v in student_sd.items():
-        if not isinstance(v, torch.Tensor):
-            print(k)
-                
+    torch.save(student_sd, args.dump_checkpoint)    
     student_model.load_state_dict(torch.load(args.dump_checkpoint))
     
     

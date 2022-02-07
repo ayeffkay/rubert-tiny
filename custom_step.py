@@ -3,13 +3,34 @@ from my_index import MyIndex, MyIndex_v1
 import numpy as np
 import torch.nn.functional as F
 
+def add_param_group(groups, module, weight_decay=1e-2):
+    no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
+    is_named = getattr(module, 'named_parameters', None)
+    if is_named and callable(is_named):
+        params = module.named_parameters()
+        param_group = [{'params': [p for n, p in params if not any(nd in n for nd in no_decay) and p.requires_grad], 
+                        'weight_decay': weight_decay}
+                      ]
+        param_group.append({'params': [p for n, p in params if any (nd in n for nd in no_decay) and p.requires_grad], 
+                            'weight_decay': 0.0})
+        for p in param_group:
+            if len(p['params']) > 0:
+                groups.append(p)
+    else:
+        param_group = {'params': module, 
+                       'weight_decay': weight_decay}
+        groups.append(param_group)
 
-def reduce_seq(x, idxs_padded, s_pad_token):
+
+def reduce_seq(x, idxs_padded, s_pad_token, average=False):
     bs, _, stu_voc_size = x.shape
     fake_seq = s_pad_token * torch.ones(bs, 1, stu_voc_size).to(x.device)
     padded_seq = torch.cat((x, fake_seq), dim=1)
     batch_idx = torch.tensor([[[i]] for i in range(bs)], dtype=torch.long).to(x.device)
-    reduced_seq = torch.sum(padded_seq[batch_idx, idxs_padded], dim=2)
+    if average:
+        reduced_seq = torch.mean(padded_seq[batch_idx, idxs_padded], dim=2)
+    else:
+        reduced_seq = torch.sum(padded_seq[batch_idx, idxs_padded], dim=2)
     return reduced_seq
 
 
@@ -56,17 +77,17 @@ def match_step(x, mask, true_label, matched_voc_ids=None):
         seq_subset = seq_subset[:, matched_voc_ids]
     return seq_subset
 
-
 def masked_select_reshape_2d(x, mask, reshape_last_dim):
     y = torch.masked_select(x, mask.unsqueeze(-1).expand_as(x)).reshape(-1, reshape_last_dim)
     return y
 
-
-def average_by_layers(x, split_ids=None, pad_token=0, attn_mask=None):
-    x_avg = torch.stack(x).mean(dim=0)
+def average_by_layers(x, split_ids=None, pad_token=0, attn_mask=None, weights=None):
+    if weights is not None:
+        x_avg = torch.stack([weights[i] * x[i] for i in range(len(x))]).mean(dim=0)
+    else:
+        x_avg = torch.stack(x).mean(dim=0)
     x_avg = average_one(x_avg, split_ids, pad_token, attn_mask)
     return x_avg
-
 
 def average_one(x, split_ids=None, pad_token=0, attn_mask=None):
     last_dim = x.size(-1)
@@ -101,11 +122,15 @@ def mse_step(hid_projectors_mse_student,
              mse_loss_fct,
              s_hid, t_hid, s_mask, t_mask, true_label=1,
              proj_strategy=None, student_split_ids=None, 
-             s_pad_token=0, t_s_layers_ids=None):
+             s_pad_token=0, t_s_layers_ids=None, 
+             student_weights=None, teacher_weights=None):
     loss_mse = 0.0
     for i, (s, t) in enumerate(get_t_s_hiddens(s_hid, t_hid, s_mask, t_mask, true_label,
                                                proj_strategy, student_split_ids, s_pad_token, 
-                                               t_s_layers_ids)):
+                                               t_s_layers_ids, 
+                                               student_weights=student_weights, 
+                                               teacher_weights=teacher_weights
+                                               )):
         b_size = t.size(0)
         if hid_projectors_mse_student is not None:
             s = hid_projectors_mse_student[i](s)
@@ -125,7 +150,8 @@ def contrastive_step(train_cardinality,
                      negative_sampling_strategy='student', use_mismatched_ids=False,
                      n_negative_samples=-1, teacher_student_prop=0.5, temperature=1,
                      from_one_sample=False, add_neg_size_constant=False, t_s_layers_ids=None, 
-                     similarity_metric=None, **kwargs):
+                     similarity_metric=None, 
+                     student_weights=None, teacher_weights=None, **kwargs):
     """"
         from_one_sample -- make sampling from current sample only, not from all batch
 
@@ -140,10 +166,14 @@ def contrastive_step(train_cardinality,
                                      s_mask, t_mask,
                                      false_label, proj_strategy,
                                      student_split_ids, s_pad_token, 
-                                     t_s_layers_ids)
+                                     t_s_layers_ids,
+                                     student_weights=student_weights, 
+                                     teacher_weights=teacher_weights)
     for i, (s, t) in enumerate(get_t_s_hiddens(s_hid, t_hid, s_mask, t_mask, true_label,
                                                proj_strategy, student_split_ids, s_pad_token, 
-                                               t_s_layers_ids)):
+                                               t_s_layers_ids, 
+                                               student_weights=student_weights, 
+                                               teacher_weights=teacher_weights)):
         if hid_projectors_contrastive_student is not None:
             s = hid_projectors_contrastive_student[i](s)
 
@@ -261,7 +291,8 @@ def contrastive_step_v0(train_cardinality,
 
 def get_t_s_hiddens(s_hid, t_hid, student_mask, teacher_mask, true_label=1, 
                     proj_strategy=None, student_split_ids=None,
-                    s_pad_token=0, t_s_layers_ids=None):
+                    s_pad_token=0, t_s_layers_ids=None, 
+                    student_weights=None, teacher_weights=None):
     s_hid_dim = s_hid[-1].size(-1)
     t_hid_dim = t_hid[-1].size(-1)
 
@@ -278,17 +309,20 @@ def get_t_s_hiddens(s_hid, t_hid, student_mask, teacher_mask, true_label=1,
             s_hid_i = masked_select_reshape_2d(s_hid_i, student_mask == true_label, s_hid_dim)
             t_hid_i = masked_select_reshape_2d(t_hid[i], teacher_mask == true_label, t_hid_dim)
             yield s_hid_i, t_hid_i
+
     elif proj_strategy == 'last':
         for i in range(9, 13):
             s_hid_i = reduce_seq(s_hid[i - 9], student_split_ids, s_pad_token) if student_split_ids is not None else s_hid[i - 9]
             s_hid_i = masked_select_reshape_2d(s_hid_i, student_mask == true_label, s_hid_dim)
             t_hid_i = masked_select_reshape_2d(t_hid[i], teacher_mask == true_label, t_hid_dim)
             yield s_hid_i, t_hid_i
-    elif proj_strategy == 'average_by_layers':
-        s_avg = average_by_layers(s_hid, student_split_ids, s_pad_token, student_mask == true_label)
-        t_avg = average_by_layers(t_hid, attn_mask=teacher_mask == true_label)
+
+    elif proj_strategy in ['average_by_layers', 'weighted_average_by_layers']:
+        s_avg = average_by_layers(s_hid, student_split_ids, s_pad_token, student_mask == true_label, weights=student_weights)
+        t_avg = average_by_layers(t_hid, attn_mask=teacher_mask == true_label, weights=teacher_weights)
         for _ in range(1):
             yield s_avg, t_avg
+
     elif proj_strategy == 'select_by_ids' and t_s_layers_ids is not None:
         s_id = t_s_layers_ids['student']
         t_id = t_s_layers_ids['teacher']
