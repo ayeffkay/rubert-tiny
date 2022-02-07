@@ -1,0 +1,6 @@
+WANDB_API_KEY: ""
+WANDB_DIR: "sst2"
+WANDB_ENTITY: "ayeffkay"
+WANDB_MODE: "offline"
+reinit: True
+project: "glue"
