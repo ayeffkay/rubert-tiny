@@ -945,6 +945,7 @@ class Distiller:
                                 temperature=self.t, 
                                 n_train_iter_total=self.n_train_iter_total, 
                                 n_sequences_total=self.n_sequences_total, 
+                                n_gradient_updates_total=self.n_gradient_updates_total, 
                                 best_total_valid_loss_epoch=self.best_total_valid_loss_epoch,
                                 last_log=self.last_log, 
                                 teacher=self.teacher.state_dict(), 
@@ -983,3 +984,4 @@ class Distiller:
                     setattr(self, k, module)
                 else:
                     setattr(self, k, v)
+
