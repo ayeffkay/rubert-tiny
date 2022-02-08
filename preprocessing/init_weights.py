@@ -1,3 +1,4 @@
+
 from argparse import ArgumentParser
 import pickle
 from transformers import (DistilBertConfig, BertConfig, AutoModelForSequenceClassification,
@@ -17,8 +18,6 @@ if __name__ == '__main__':
     parser.add_argument('--num_labels', type=int, default=2, nargs='?')
     
     args, _ = parser.parse_known_args()
-    assert args.vocab_transform and args.mode == 'masked_lm'
-
 
     if args.mode == 'masked_lm':
         teacher_model = BertForMaskedLM.from_pretrained(args.teacher_name)
@@ -69,7 +68,7 @@ if __name__ == '__main__':
     else:
         student_sd[student_embs_name] = teacher_sd[teacher_embs_name][:, :student_config.dim]
         student_sd[student_pos_ids_name] = teacher_sd[teacher_pos_ids_name][:, :student_config.dim]
-        if args.mode != 'classification':
+        if args.mode != 'finetuning':
             student_sd["vocab_projector.weight"] = teacher_sd["cls.predictions.decoder.weight"][:, :student_config.dim]
             student_sd["vocab_projector.bias"] = teacher_sd["cls.predictions.bias"]
     
@@ -161,9 +160,3 @@ if __name__ == '__main__':
     
     torch.save(student_sd, args.dump_checkpoint)    
     student_model.load_state_dict(torch.load(args.dump_checkpoint))
-    
-    
-        
-    
-    
-    

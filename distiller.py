@@ -435,7 +435,6 @@ class Distiller:
         if self.is_master:
             logger.info("Save very last checkpoint as `pytorch_model.bin`.")
             self.save_checkpoint(checkpoint_name="pytorch_model.bin")
-            self.save_full()
             logger.info("Training is finished")
 
     def validate(self):
@@ -841,6 +840,7 @@ class Distiller:
 
         if self.is_master:
             self.save_checkpoint(checkpoint_name=f"model_epoch_{self.epoch}.pth")
+            self.save_full('last_checkpoint.pth')
             lr = [g['lr'] for g in self.optimizer.param_groups if 'lr' in g][0]
             self.tensorboard.add_scalar(
                 tag="epoch/learning_rate",
@@ -942,7 +942,7 @@ class Distiller:
 
     def save_full(self, checkpoint_name='last_checkpoint.pth'):
         train_state_dict = dict(epoch=self.epoch, 
-                                temperature=self.t, 
+                                temperature=self.temperature, 
                                 n_train_iter_total=self.n_train_iter_total, 
                                 n_sequences_total=self.n_sequences_total, 
                                 n_gradient_updates_total=self.n_gradient_updates_total, 
