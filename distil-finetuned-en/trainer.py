@@ -45,8 +45,6 @@ class StudentTrainer(object):
         self.valid_patience = params.valid_patience
         self.validation_patience_ct = 0
         self.log_after_n_steps = params.log_after_n_steps
-        if params.log_after_epoch:
-            self.log_after_n_steps = len(self.train_loader)
 
         self.gradient_accumulation_steps = params.gradient_accumulation_steps
         self.n_gradient_updates = 0
@@ -69,6 +67,10 @@ class StudentTrainer(object):
         self.valid_loader = DataLoader(valid_data, params.batch_size, shuffle=False, collate_fn=load_data.collate_fn)
         self.test_loader = DataLoader(valid_data, params.batch_size, shuffle=False, collate_fn=load_data.collate_fn)
 
+        self.log_after_n_steps = params.log_after_n_steps
+        if params.log_after_epoch:
+            self.log_after_n_steps = len(self.train_loader)
+            
         self.gpu_id = params.gpu_id
         self.n_classes = train_data.features['labels'].num_classes
         config = AutoConfig.from_pretrained(params.model_name, num_labels=self.n_classes, output_hidden_states=True, return_dict=True)

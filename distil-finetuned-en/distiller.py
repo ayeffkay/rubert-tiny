@@ -47,10 +47,6 @@ class Distiller(object):
         self.valid_metric_value = 0
         self.best_valid_metric_value = 0
 
-        self.log_after_n_steps = params.log_after_n_steps
-        if params.log_after_epoch:
-            self.log_after_n_steps = len(self.train_loader)
-
         self.gradient_accumulation_steps = params.gradient_accumulation_steps
         self.n_gradient_updates = 0
 
@@ -67,6 +63,10 @@ class Distiller(object):
                                                 'validation')
         self.train_loader = DataLoader(train_data, params.batch_size, shuffle=True)
         self.valid_loader = DataLoader(valid_data, params.batch_size, shuffle=False)
+
+        self.log_after_n_steps = params.log_after_n_steps
+        if params.log_after_epoch:
+            self.log_after_n_steps = len(self.train_loader)
 
         self.gpu_id = params.gpu_id
         self.n_classes = train_data.features['labels'].num_classes
