@@ -458,10 +458,6 @@ class Distiller:
 
         if self.n_gradient_updates_total > self.warmup_steps:
             self.reduce_on_plateau.step(self.total_valid_loss_epoch/self.n_valid_iter_epoch)
-            """
-            if self.trainable_projections:
-                self.reduce_on_plateau_.step(self.total_valid_loss_epoch/self.n_valid_iter_epoch)
-            """
 
         if self.is_master:
             logger.info(f"--- Ending validation epoch {self.epoch}/{self.params.n_epoch-1}")
@@ -938,7 +934,7 @@ class Distiller:
         mdl_to_save.config.save_pretrained(self.dump_path)
         state_dict = mdl_to_save.state_dict()
         torch.save(state_dict, os.path.join(self.dump_path, checkpoint_name))
-
+    
 
     def save_full(self, checkpoint_name='last_checkpoint.pth'):
         train_state_dict = dict(epoch=self.epoch, 
@@ -956,7 +952,7 @@ class Distiller:
         if self.alpha_mse > 0.0:
             if self.hid_projectors_mse_student is not None:
                 train_state_dict['hid_projectors_mse_student'] = self.hid_projectors_mse_student.state_dict()
-            if self.hid_projections_mse_teacher is not None:
+            if self.hid_projectors_mse_teacher is not None:
                 train_state_dict['hid_projectors_mse_teacher'] = self.hid_projectors_mse_teacher.state_dict()
         if self.alpha_contrastive > 0.0:
             if self.hid_projectors_contrastive_student is not None:
