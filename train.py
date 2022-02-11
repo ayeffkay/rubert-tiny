@@ -77,7 +77,8 @@ def main():
     parser.add_argument(
          "--dump_path", type=str, required=True, help="The output directory (log, checkpoints, parameters, etc.)"
     )
-
+    parser.add_argument("--train_projections", action='store_true')
+    parser.add_argument("--train_weights", action='store_true')
     tb_group = parser.add_argument_group('tensorboard_args')
     tb_group.add_argument('--tensorboard_logs_path')
     tb_group.add_argument('--tensorboard_log_name')

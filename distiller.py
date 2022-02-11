@@ -168,10 +168,14 @@ class Distiller:
         if self.params.projection_strategy == 'weighted_average_by_layers':
             a = torch.rand(self.teacher_config.num_hidden_layers + 1, requires_grad=True, device=f'cuda:{params.local_rank}')
             b = torch.rand(self.student_config.num_hidden_layers + 1, requires_grad=True, device=f'cuda:{params.local_rank}')
-            self.teacher_weights = nn.Parameter(a)
-            self.student_weights = nn.Parameter(b)
-            custom_step.add_param_group(optimizer_grouped_parameters, self.teacher_weights, params.weight_decay)
-            custom_step.add_param_group(optimizer_grouped_parameters, self.student_weights, params.weight_decay)
+            if params.train_weights:
+                self.teacher_weights = nn.Parameter(a)
+                self.student_weights = nn.Parameter(b)
+                custom_step.add_param_group(optimizer_grouped_parameters, self.teacher_weights, params.weight_decay)
+                custom_step.add_param_group(optimizer_grouped_parameters, self.student_weights, params.weight_decay)
+            else:
+                self.teacher_weights = a
+                self.student_weights = b
         else:
             self.teacher_weights = None
             self.student_weights = None
@@ -185,23 +189,25 @@ class Distiller:
                 self.hid_projectors_mse_student = nn.ModuleList([nn.Linear(student.config.hidden_size, 
                                                                 teacher.config.hidden_size).to(f'cuda:{params.local_rank}') for _ in range(layers_ct)])
                 self.hid_projectors_mse_teacher = None
-                custom_step.add_param_group(optimizer_grouped_parameters, self.hid_projectors_mse_student, params.weight_decay)
 
             elif self.params.project_to == 'student':
                 self.hid_projectors_mse_teacher = nn.ModuleList([nn.Linear(teacher.config.hidden_size, 
                                                                 student.config.hidden_size).to(f'cuda:{params.local_rank}') for _ in range(layers_ct)])
                 self.hid_projectors_mse_student = None
-                custom_step.add_param_group(optimizer_grouped_parameters, self.hid_projectors_mse_teacher, params.weight_decay)
         
             else:
                 self.hid_projectors_mse_teacher = nn.ModuleList([nn.Linear(teacher.config.hidden_size, 
                                                                 self.params.intermediate_dim).to(f'cuda:{params.local_rank}') for _ in range(layers_ct)])
                 self.hid_projectors_mse_student = nn.ModuleList([nn.Linear(student.config.hidden_size, 
                                                                 self.params.intermediate_dim).to(f'cuda:{params.local_rank}') for _ in range(layers_ct)])
+            
+            if params.train_projections:
+                if self.hid_projectors_mse_teacher is not None:
+                    custom_step.add_param_group(optimizer_grouped_parameters, self.hid_projectors_mse_teacher, params.weight_decay)
+                if self.hid_projectors_mse_student is not None:
+                    custom_step.add_param_group(optimizer_grouped_parameters, self.hid_projectors_mse_student, params.weight_decay)
 
-                
-                custom_step.add_param_group(optimizer_grouped_parameters, self.hid_projectors_mse_teacher, params.weight_decay)
-                custom_step.add_param_group(optimizer_grouped_parameters, self.hid_projectors_mse_student, params.weight_decay)
+
 
         if self.alpha_cos > 0.0:
             self.last_loss_cos = 0
@@ -251,19 +257,21 @@ class Distiller:
                         self.hid_projectors_contrastive_teacher = None
                         self.hid_projectors_contrastive_student = nn.ModuleList([hypnn.HypLinear(self.s_hid_dim, self.t_hid_dim, 
                                                                                                  self.c, params.use_bias).to(f'cuda:{params.local_rank}') for _ in range(layers_ct)])
-                        custom_step.add_param_group(optimizer_grouped_parameters, self.hid_projectors_contrastive_student, params.weight_decay)
                     elif params.project_to =='student':
                         self.hid_projectors_contrastive_student = None
                         self.hid_projectors_contrastive_teacher = nn.ModuleList([hypnn.HypLinear(self.t_hid_dim, self.s_hid_dim, 
                                                                                                  self.c, params.use_bias).to(f'cuda:{params.local_rank}') for _ in range(layers_ct)])
-                        custom_step.add_param_group(optimizer_grouped_parameters, self.hid_projectors_contrastive_teacher, params.weight_decay)
                     else:
                         self.hid_projectors_contrastive_student = nn.ModuleList([hypnn.HypLinear(self.s_hid_dim, params.intermediate_dim, 
                                                                                                  self.c, params.use_bias).to(f'cuda:{params.local_rank}') for _ in range(layers_ct)])
                         self.hid_projectors_contrastive_teacher = nn.ModuleList([hypnn.HypLinear(self.t_hid_dim, params.intermediate_dim, 
                                                                                                  self.c, params.use_bias).to(f'cuda:{params.local_rank}') for _ in range(layers_ct)])
-                        custom_step.add_param_group(optimizer_grouped_parameters, self.hid_projectors_contrastive_student, params.weight_decay)
-                        custom_step.add_param_group(optimizer_grouped_parameters, self.hid_projectors_contrastive_teacher, params.weight_decay)
+                    if params.train_projections:
+                        if self.hid_projectors_contrastive_teacher is not None:
+                            custom_step.add_param_group(optimizer_grouped_parameters, self.hid_projectors_contrastive_teacher, params.weight_decay)
+                        if self.hid_projectors_contrastive_student is not None:
+                            custom_step.add_param_group(optimizer_grouped_parameters, self.hid_projectors_contrastive_student, params.weight_decay)
+
                 else:
                     if params.project_to == 'teacher':
                         s_ball_dim = self.t_hid_dim
@@ -293,16 +301,16 @@ class Distiller:
                 if params.project_to == 'teacher':
                     self.hid_projectors_contrastive_teacher = None
                     self.hid_projectors_contrastive_student = nn.ModuleList([nn.Linear(self.s_hid_dim, self.t_hid_dim).to(f'cuda:{self.params.local_rank}') for _ in range(layers_ct)])
-                    custom_step.add_param_group(optimizer_grouped_parameters, self.hid_projectors_contrastive_student, params.weight_decay)
                 elif params.project_to =='student':
                     self.hid_projectors_contrastive_student = None
                     self.hid_projectors_contrastive_teacher = nn.ModuleList([nn.Linear(self.t_hid_dim, self.s_hid_dim).to(f'cuda:{self.params.local_rank}') for _ in range(layers_ct)])
-                    custom_step.add_param_group(optimizer_grouped_parameters, self.hid_projectors_contrastive_teacher, params.weight_decay)
                 else:
                     self.hid_projectors_contrastive_student = nn.ModuleList([nn.Linear(self.s_hid_dim, params.intermediate_dim).to(f'cuda:{self.params.local_rank}') for _ in range(layers_ct)])
                     self.hid_projectors_contrastive_teacher = nn.ModuleList([nn.Linear(self.t_hid_dim, params.intermediate_dim).to(f'cuda:{self.params.local_rank}') for _ in range(layers_ct)])
+                if self.hid_projectors_contrastive_teacher is not None:
+                    custom_step.add_param_group(optimizer_grouped_parameters, self.hid_projectors_contrastive_teacher, params.weight_decay)
+                if self.hid_projectors_contrastive_student is not None:
                     custom_step.add_param_group(optimizer_grouped_parameters, self.hid_projectors_contrastive_student, params.weight_decay)
-                    custom_step.add_param_group(optimizer_grouped_parameters, self.hid_projectors_contrastive_teacher, params.weight_decay)  
 
         self.optimizer = AdamW(
             optimizer_grouped_parameters, lr=params.learning_rate, eps=params.adam_epsilon, betas=(0.9, 0.98)
