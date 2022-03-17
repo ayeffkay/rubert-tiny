@@ -559,7 +559,7 @@ class Distiller:
                                                     student_weights=self.student_weights, 
                                                     teacher_weights=self.teacher_weights)
                 if self.alpha_contrastive > 0.0:
-                    loss_contrastive = custom_step.contrastive_step(self.params.train_cardinality, 
+                    loss_contrastive = custom_step.contrastive_step_v1(self.params.train_cardinality, 
                                                                     self.hid_projectors_contrastive_student,
                                                                     self.hid_projectors_contrastive_teacher, 
                                                                     s_hiddens, t_hiddens, student_mask, teacher_mask, 
@@ -593,7 +593,7 @@ class Distiller:
                                                     student_weights=self.student_weights, 
                                                     teacher_weights=self.teacher_weights)
                 if self.alpha_contrastive > 0.0:
-                    loss_contrastive = custom_step.contrastive_step(self.params.train_cardinality,
+                    loss_contrastive = custom_step.contrastive_step_v1(self.params.train_cardinality,
                                                                     self.hid_projectors_contrastive_student, 
                                                                     self.hid_projectors_contrastive_teacher, 
                                                                     s_hiddens, t_hiddens,
