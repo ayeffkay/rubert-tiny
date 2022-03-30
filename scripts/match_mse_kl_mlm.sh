@@ -34,3 +34,5 @@ python -m torch.distributed.launch \
     --gpus $WORLD_SIZE \
     --seed 42 --log_interval 16 \
     --matching_ids matched_tokens.pickle
+
+    
