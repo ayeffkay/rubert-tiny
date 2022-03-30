@@ -119,7 +119,7 @@ def main():
 
     parser.add_argument("--alpha_mse", default=0.0, type=float, help="Linear weight of the MSE loss. Must be >=0.")
     parser.add_argument('--projection_strategy', choices=['last', 'skip', 'average', 'average_by_layers', 
-                        'select_by_ids', 'weighted_average_by_layers', None], default=None,
+                        'select_by_ids', 'weighted_average_by_layers', 'pool_and_project', None], default=None,
                         help="""How to use student and teacher hidden representations for MSE loss.
                         last -- use last states of teacher and student (1-1 mapping), 
                         skip -- use intermediate states from teacher and student (1-1 mapping), 

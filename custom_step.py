@@ -267,14 +267,19 @@ def contrastive_step_v1(train_cardinality,
                         n_negative_samples=-1, teacher_student_prop=0.5, temperature=1,
                         from_one_sample=False, add_neg_size_constant=False, t_s_layers_ids=None, 
                         similarity_metric=None, 
-                        student_weights=None, teacher_weights=None, **kwargs):
+                        student_weights=None, teacher_weights=None, 
+                        layers_projectors_contrastive_student=None, 
+                        layers_projectors_contrastive_teacher=None, **kwargs):
     loss_contrastive = 0.0
 
     for i, (s, t) in enumerate(get_t_s_hiddens(s_hid, t_hid, s_mask, t_mask, true_label,
                                                proj_strategy, student_split_ids, s_pad_token, 
                                                t_s_layers_ids, 
                                                student_weights=student_weights, 
-                                               teacher_weights=teacher_weights)):
+                                               teacher_weights=teacher_weights, 
+                                               layers_projectors_contrastive_student=layers_projectors_contrastive_student, 
+                                               layers_projectors_contrastive_teacher=layers_projectors_contrastive_teacher
+                               )):
         if hid_projectors_contrastive_student is not None:
             s = hid_projectors_contrastive_student[i](s)
 
@@ -286,19 +291,19 @@ def contrastive_step_v1(train_cardinality,
             s = kwargs['student_to_poincare'](s, c)
             t = kwargs['teacher_to_poincare'](t, c)
 
-        # loop by b*seq_len, here t.size(0) = s.size(0) as get_t_s_hiddens returns aligned sequences
         b_seq_len = t.size(0)
-        s_mismatches_ct = 0; t_mismatches_ct = 0
-        layer_contrastive_loss = 0.0
-
         idxs = np.tile(np.arange(b_seq_len), (b_seq_len, 1))
         eye = np.eye(b_seq_len, b_seq_len).astype(bool)
         idxs_slct = idxs[~eye].reshape(b_seq_len, -1)
-        n_negative_samples = max(min(n_negative_samples, b_seq_len - 1), 1)
+        n_negative_samples = min(n_negative_samples, b_seq_len - 1) if n_negative_samples != -1 else b_seq_len - 1
         neg_idxs = torch.tensor([np.random.choice(idxs_slct[j], size=n_negative_samples, replace=False) for j in range(len(idxs_slct))])
         
         # b_seq_len * 1 * 1
         pos_prod = torch.bmm(t.unsqueeze(1), s.unsqueeze(2)).squeeze(2)
+        t_norm = torch.norm(t, p=2, dim=1, keepdim=True)
+        s_norm = torch.norm(s, p=2, dim=1, keepdim=True)
+        cos_sim_pos = pos_prod / (t_norm * s_norm)
+
         if negative_sampling_strategy == 'teacher':
             # b_seq_len * n_negative_samples * hid_dim -> b_seq_len * hid_dim * n_negative_samples
             neg_samples = t[neg_idxs].transpose(1, 2)
@@ -307,14 +312,20 @@ def contrastive_step_v1(train_cardinality,
         else:
             neg_samples = s[neg_idxs].transpose(1, 2)
             pos_samples = t.unsqueeze(1)
-
         # b_seq_len * 1 * n_negative_samples
         pos_neg_prod = torch.bmm(pos_samples, neg_samples).squeeze()
+        # b_seq_len * 1
+        pos_samples_norm = torch.norm(pos_samples, p=2, dim=2)
+        # b_seq_len * n_negative_samples
+        neg_samples_norm = torch.norm(neg_samples, p=2, dim=1)
+        pos_neg_norm = pos_samples_norm * neg_samples_norm
+        cos_sim_neg = pos_neg_prod / pos_neg_norm
         # b_seq_len * (n_negative_samples + 1)
-        total = torch.cat((pos_prod, pos_neg_prod), dim=1)
-        num = torch.exp(pos_prod / temperature).squeeze()
-        den = torch.sum(torch.exp(total / temperature), dim=1)
-        loss_contrastive = -torch.mean(torch.log(num / den))
+        total = torch.cat((cos_sim_pos, cos_sim_neg), dim=1)
+        exp = torch.exp(total)
+        loss_contrastive = -torch.log(exp[:, 0] / exp.sum(dim=1)).mean()
+        #softmax_total = F.log_softmax(total / temperature, dim=1)
+        #loss_contrastive = -softmax_total[:, 0].mean()
 
     return loss_contrastive
 
@@ -355,7 +366,9 @@ def contrastive_step_v0(train_cardinality,
 def get_t_s_hiddens(s_hid, t_hid, student_mask, teacher_mask, true_label=1, 
                     proj_strategy=None, student_split_ids=None,
                     s_pad_token=0, t_s_layers_ids=None, 
-                    student_weights=None, teacher_weights=None):
+                    student_weights=None, teacher_weights=None, 
+                    layers_projectors_contrastive_student=None, 
+                    layers_projectors_contrastive_teacher=None):
     s_hid_dim = s_hid[-1].size(-1)
     t_hid_dim = t_hid[-1].size(-1)
 
@@ -394,6 +407,21 @@ def get_t_s_hiddens(s_hid, t_hid, student_mask, teacher_mask, true_label=1,
         t_i = masked_select_reshape_2d(t_hid[t_id], teacher_mask == true_label, t_hid_dim)
         for _ in range(1):
             yield s_i, t_i
+
+    elif proj_strategy == 'pool_and_project':
+        # n_layers * b * seq_len * hid_dim
+        s_cat = torch.stack(s_hid, dim=0)
+        t_cat = torch.stack(t_hid, dim=0)
+
+        # n_layers * b * hid_dim -> b * n_layers * hid_dim
+        s_cat_pooled = torch.mean(s_cat, dim=2).permute(1, 2, 0)
+        t_cat_pooled = torch.mean(t_cat, dim=2).permute(1, 2, 0)
+
+        s_cat_pooled_proj = layers_projectors_contrastive_student(s_cat_pooled).squeeze(2)
+        t_cat_pooled_proj = layers_projectors_contrastive_teacher(t_cat_pooled).squeeze(2)
+
+        for _ in range(1):
+            yield s_cat_pooled_proj, t_cat_pooled_proj
 
 
 def negative_sampling(s=None, t=None, positive_idx=0, k=-1, weights=None, prop=0.5, sampling_strategy='teacher'):
