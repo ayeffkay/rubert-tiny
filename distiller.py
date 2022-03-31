@@ -312,21 +312,22 @@ class Distiller:
                     self.hid_projectors_contrastive_student = nn.ModuleList([nn.Linear(self.s_hid_dim, params.intermediate_dim).to(f'cuda:{self.params.local_rank}') for _ in range(layers_ct)])
                     self.hid_projectors_contrastive_teacher = nn.ModuleList([nn.Linear(self.t_hid_dim, params.intermediate_dim).to(f'cuda:{self.params.local_rank}') for _ in range(layers_ct)])
 
-                if params.projection_strategy == 'pool_and_project':
-                    # m = 1
-                    self.layers_projectors_contrastive_teacher = nn.Linear(self.n_teacher_layers, 1).to(f'cuda:{params.local_rank}')
-                    self.layers_projectors_contrastive_student = nn.Linear(self.n_student_layers, 1).to(f'cuda:{params.local_rank}')
-                    custom_step.add_param_group(optimizer_grouped_parameters, 
-                                                self.layers_projectors_contrastive_teacher, 
-                                                params.weight_decay)
-                    custom_step.add_param_group(optimizer_grouped_parameters, 
-                                                self.layers_projectors_contrastive_student, 
-                                                params.weight_decay)
-                
                 if self.hid_projectors_contrastive_teacher is not None:
                     custom_step.add_param_group(optimizer_grouped_parameters, self.hid_projectors_contrastive_teacher, params.weight_decay)
                 if self.hid_projectors_contrastive_student is not None:
                     custom_step.add_param_group(optimizer_grouped_parameters, self.hid_projectors_contrastive_student, params.weight_decay)
+
+            
+            if params.projection_strategy == 'pool_and_project':
+                # m = 1, TODO: with nn.Hyplinear
+                self.layers_projectors_contrastive_teacher = nn.Linear(self.n_teacher_layers, 1).to(f'cuda:{params.local_rank}')
+                self.layers_projectors_contrastive_student = nn.Linear(self.n_student_layers, 1).to(f'cuda:{params.local_rank}')
+                custom_step.add_param_group(optimizer_grouped_parameters, 
+                                            self.layers_projectors_contrastive_teacher, 
+                                            params.weight_decay)
+                custom_step.add_param_group(optimizer_grouped_parameters, 
+                                            self.layers_projectors_contrastive_student, 
+                                            params.weight_decay)
 
         self.optimizer = AdamW(
             optimizer_grouped_parameters, lr=params.learning_rate, eps=params.adam_epsilon, betas=(0.9, 0.98)
