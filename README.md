@@ -1,7 +1,7 @@
 This is official implementation of the paper [**`Knowledge Distillation of Russian Language Models with Reduction of Vocabulary`**](https://arxiv.org/abs/2205.02340).
 
 ### Citation
-If you found this code or results from the paper useful, we are kindly ask your to cite this paper:
+If you found this code or results from the paper useful, we are kindly ask you to cite the paper:
 ```
 @misc{https://doi.org/10.48550/arxiv.2205.02340,
   doi = {10.48550/ARXIV.2205.02340},
