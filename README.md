@@ -21,12 +21,14 @@ If you found this code or results from the paper useful, we are kindly ask your 
   copyright = {arXiv.org perpetual, non-exclusive license}
 }
 ```
+### Credits
+This code is based on [DistilBERT](https://arxiv.org/abs/1910.01108) official implementation https://github.com/huggingface/transformers/tree/main/examples/research_projects/distillation.
+
 ### Dependencies
 ```
 pip install -r requirements.txt
 ```
 ### Data
-Required data files are already generated and located in `/home/ayeffkay/rubert_tiny`. Provided scripts can generate files with same names.
 For training you'll need 
 * folder `processed_binarized` (binarized shards)
 * `rubert_tiny_weights.pth` (student weights for initialization)
