@@ -1,3 +1,26 @@
+This is official implementation of the paper [**`Knowledge Distillation of Russian Language Models with Reduction of Vocabulary`**](https://arxiv.org/abs/2205.02340).
+
+### Citation
+If you found this code or results from the paper useful, we are kindly ask your to cite this paper:
+```
+@misc{https://doi.org/10.48550/arxiv.2205.02340,
+  doi = {10.48550/ARXIV.2205.02340},
+  
+  url = {https://arxiv.org/abs/2205.02340},
+  
+  author = {Kolesnikova, Alina and Kuratov, Yuri and Konovalov, Vasily and Burtsev, Mikhail},
+  
+  keywords = {Computation and Language (cs.CL), Machine Learning (cs.LG), FOS: Computer and information sciences, FOS: Computer and information sciences},
+  
+  title = {Knowledge Distillation of Russian Language Models with Reduction of Vocabulary},
+  
+  publisher = {arXiv},
+  
+  year = {2022},
+  
+  copyright = {arXiv.org perpetual, non-exclusive license}
+}
+```
 ### Dependencies
 ```
 pip install -r requirements.txt
